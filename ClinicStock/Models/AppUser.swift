@@ -6,10 +6,10 @@
 //
 
 import Foundation
-//import FirebaseFirestore
+import FirebaseFirestore
 
-struct AppUser: Codable/*, Identifiable*/ {
-//    @DocumentID var id: String?
+struct AppUser: Codable, Identifiable{
+    @DocumentID var id: String?
     var email: String
     var displayName: String
     var role: UserRole
@@ -21,25 +21,25 @@ struct AppUser: Codable/*, Identifiable*/ {
     
     enum UserRole: String, Codable, CaseIterable {
         case admin
-        case clinicManager
+        case manager
         case editor
-        case viewer
+        case staff
         
         var displayName: String {
             switch self {
             case .admin: return "Admin"
-            case .clinicManager: return "Clinic Manager"
+            case .manager: return "Manager"
             case .editor: return "Editor"
-            case .viewer: return "Viewer"
+            case .staff: return "Staff"
             }
         }
         
         var color: String {
             switch self {
             case .admin: return "red"
-            case .clinicManager: return "purple"
+            case .manager: return "purple"
             case .editor: return "blue"
-            case .viewer: return "gray"
+            case .staff: return "gray"
             }
         }
     }

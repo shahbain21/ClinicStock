@@ -6,10 +6,10 @@
 //
 
 import Foundation
-//import FirebaseFirestore
+import FirebaseFirestore
 
-struct Clinic: Codable /*, Identifiable*/ {
-//    @DocumentID var id: String?
+struct Clinic: Codable , Identifiable{
+    @DocumentID var id: String?
     var name: String
     var address: String
     var city: String

@@ -6,10 +6,10 @@
 //
 
 import Foundation
-//import FirebaseFirestore
+import FirebaseFirestore
 
-struct InventoryItem: Codable/*, Identifiable*/ {
-//    @DocumentID var id: String?
+struct InventoryItem: Codable, Identifiable{
+    @DocumentID var id: String?
     var name: String
     var hcpcsCode: String
     var lotNumber: String

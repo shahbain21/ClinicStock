@@ -6,6 +6,11 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		817506842F7FF1C700825DB8 /* FirebaseAuth in Frameworks */ = {isa = PBXBuildFile; productRef = 817506832F7FF1C700825DB8 /* FirebaseAuth */; };
+		817506862F7FF1C700825DB8 /* FirebaseFirestore in Frameworks */ = {isa = PBXBuildFile; productRef = 817506852F7FF1C700825DB8 /* FirebaseFirestore */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXFileReference section */
 		817506602F7AC69000825DB8 /* ClinicStock.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = ClinicStock.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
@@ -23,6 +28,8 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				817506842F7FF1C700825DB8 /* FirebaseAuth in Frameworks */,
+				817506862F7FF1C700825DB8 /* FirebaseFirestore in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -65,6 +72,8 @@
 			);
 			name = ClinicStock;
 			packageProductDependencies = (
+				817506832F7FF1C700825DB8 /* FirebaseAuth */,
+				817506852F7FF1C700825DB8 /* FirebaseFirestore */,
 			);
 			productName = ClinicStock;
 			productReference = 817506602F7AC69000825DB8 /* ClinicStock.app */;
@@ -94,6 +103,9 @@
 			);
 			mainGroup = 817506572F7AC69000825DB8;
 			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				817506822F7FF1C700825DB8 /* XCRemoteSwiftPackageReference "firebase-ios-sdk" */,
+			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 817506612F7AC69000825DB8 /* Products */;
 			projectDirPath = "";
@@ -251,6 +263,7 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 7C7WV8TT97;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
@@ -282,6 +295,7 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 7C7WV8TT97;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
@@ -328,6 +342,30 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		817506822F7FF1C700825DB8 /* XCRemoteSwiftPackageReference "firebase-ios-sdk" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/firebase/firebase-ios-sdk";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 12.11.0;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		817506832F7FF1C700825DB8 /* FirebaseAuth */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 817506822F7FF1C700825DB8 /* XCRemoteSwiftPackageReference "firebase-ios-sdk" */;
+			productName = FirebaseAuth;
+		};
+		817506852F7FF1C700825DB8 /* FirebaseFirestore */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 817506822F7FF1C700825DB8 /* XCRemoteSwiftPackageReference "firebase-ios-sdk" */;
+			productName = FirebaseFirestore;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = 817506582F7AC69000825DB8 /* Project object */;
 }

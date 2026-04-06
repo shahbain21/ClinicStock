@@ -6,10 +6,10 @@
 //
 
 import Foundation
-//import FirebaseFirestore
+import FirebaseFirestore
 
-struct HistoryLog: Codable/*, Identifiable*/ {
-//    @DocumentID var id: String?
+struct HistoryLog: Codable, Identifiable{
+    @DocumentID var id: String?
     var itemID: String
     var itemName: String
     var itemBarcode: String
