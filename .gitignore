@@ -1,1 +1,22 @@
+# Xcode
+DerivedData/
+build/
+*.xcuserstate
+xcuserdata/
+
+# User-specific settings
+**/xcuserdata/**
+
+# macOS
+**/.DS_Store
+.DS_Store
+
+# Secrets
 GoogleService-Info.plist
+
+# Swift Package Manager
+.build/
+Packages/
+
+# CocoaPods (if used later)
+Pods/
