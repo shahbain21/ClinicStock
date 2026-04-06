@@ -17,7 +17,7 @@ struct TestInventoryView: View {
                 if inventoryManager.items.isEmpty {
                     VStack(spacing: 12) {
                         ProgressView()
-                        Text("Loading inventory...")
+                        Text("Loading inventory..")
                             .foregroundColor(.secondary)
                     }
                 } else {
