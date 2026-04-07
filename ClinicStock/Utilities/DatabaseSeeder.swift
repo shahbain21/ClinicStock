@@ -42,7 +42,7 @@ class DatabaseSeeder: ObservableObject {
         
         // Step 4: Add inventory from checklist
         await updateStatus("Adding inventory items...")
-        await createInventory(clinicID: clinicID)
+//        await createInventory(clinicID: clinicID)
         
         // Done!
         await MainActor.run {
@@ -148,75 +148,75 @@ class DatabaseSeeder: ObservableObject {
     }
     
     // ── Create Inventory (from your Dearborn checklist) ──
-    private func createInventory(clinicID: String) async {
-        
-        let items: [[String: Any]] = [
-            makeItem(name: "LSO Brace", hcpcs: "L0625", size: "Universal",
-                    qty: 51, category: "Lumbar", clinicID: clinicID),
-            
-            makeItem(name: "TENS Unit", hcpcs: "E0720", size: "N/A",
-                    qty: 71, category: "Electrical Stimulation", clinicID: clinicID),
-            
-            makeItem(name: "Knee Brace", hcpcs: "L1820", size: "S",
-                    qty: 0, category: "Orthopedic", clinicID: clinicID),
-            
-            makeItem(name: "Knee Brace", hcpcs: "L1820", size: "M",
-                    qty: 20, category: "Orthopedic", clinicID: clinicID),
-            
-            makeItem(name: "Knee Brace", hcpcs: "L1820", size: "L",
-                    qty: 18, category: "Orthopedic", clinicID: clinicID),
-            
-            makeItem(name: "Knee Brace", hcpcs: "L1820", size: "XL",
-                    qty: 23, category: "Orthopedic", clinicID: clinicID),
-            
-            makeItem(name: "Knee Brace", hcpcs: "L1820", size: "XXL",
-                    qty: 0, category: "Orthopedic", clinicID: clinicID),
-            
-            makeItem(name: "Wrist Brace", hcpcs: "L3908", size: "Universal",
-                    qty: 15, category: "Orthopedic", clinicID: clinicID),
-            
-            makeItem(name: "Cervical Collar Coretech", hcpcs: "L0172", size: "Universal",
-                    qty: 40, category: "Cervical", clinicID: clinicID),
-            
-            makeItem(name: "Soft Cervical Collar", hcpcs: "L0120", size: "Universal",
-                    qty: 28, category: "Cervical", clinicID: clinicID),
-            
-            makeItem(name: "Cane", hcpcs: "E0100", size: "N/A",
-                    qty: 0, category: "Mobility Aids", clinicID: clinicID),
-            
-            makeItem(name: "Walker", hcpcs: "E0130", size: "N/A",
-                    qty: 0, category: "Mobility Aids", clinicID: clinicID),
-            
-            makeItem(name: "Crutches", hcpcs: "E0110", size: "N/A",
-                    qty: 0, category: "Mobility Aids", clinicID: clinicID),
-            
-            makeItem(name: "Abdominal Binder", hcpcs: "L0620", size: "Universal",
-                    qty: 0, category: "Lumbar", clinicID: clinicID),
-            
-            makeItem(name: "SI Belt Coretech", hcpcs: "L0621", size: "Universal",
-                    qty: 3, threshold: 5, category: "Lumbar", clinicID: clinicID),
-            
-            makeItem(name: "ROM Knee Brace", hcpcs: "L1832", size: "Universal",
-                    qty: 0, category: "Orthopedic", clinicID: clinicID),
-            
-            makeItem(name: "OA Knee Brace", hcpcs: "L1843", size: "RT",
-                    qty: 0, category: "Orthopedic", clinicID: clinicID),
-            
-            makeItem(name: "OA Knee Brace", hcpcs: "L1843", size: "LT",
-                    qty: 0, category: "Orthopedic", clinicID: clinicID),
-        ]
-        
-        for item in items {
-            do {
-                let _ = try await db.collection("inventory").addDocument(data: item)
-                print("Added: \(item["name"] ?? "") (\(item["size"] ?? ""))")
-            } catch {
-                print("Error adding item: \(error)")
-            }
-        }
-        
-        print(" Added \(items.count) inventory items")
-    }
+//    private func createInventory(clinicID: String) async {
+//        
+//        let items: [[String: Any]] = [
+//            makeItem(name: "LSO Brace", hcpcs: "L0625", size: "Universal",
+//                    qty: 51, category: "Lumbar", clinicID: clinicID),
+//            
+//            makeItem(name: "TENS Unit", hcpcs: "E0720", size: "N/A",
+//                    qty: 71, category: "Electrical Stimulation", clinicID: clinicID),
+//            
+//            makeItem(name: "Knee Brace", hcpcs: "L1820", size: "S",
+//                    qty: 0, category: "Orthopedic", clinicID: clinicID),
+//            
+//            makeItem(name: "Knee Brace", hcpcs: "L1820", size: "M",
+//                    qty: 20, category: "Orthopedic", clinicID: clinicID),
+//            
+//            makeItem(name: "Knee Brace", hcpcs: "L1820", size: "L",
+//                    qty: 18, category: "Orthopedic", clinicID: clinicID),
+//            
+//            makeItem(name: "Knee Brace", hcpcs: "L1820", size: "XL",
+//                    qty: 23, category: "Orthopedic", clinicID: clinicID),
+//            
+//            makeItem(name: "Knee Brace", hcpcs: "L1820", size: "XXL",
+//                    qty: 0, category: "Orthopedic", clinicID: clinicID),
+//            
+//            makeItem(name: "Wrist Brace", hcpcs: "L3908", size: "Universal",
+//                    qty: 15, category: "Orthopedic", clinicID: clinicID),
+//            
+//            makeItem(name: "Cervical Collar Coretech", hcpcs: "L0172", size: "Universal",
+//                    qty: 40, category: "Cervical", clinicID: clinicID),
+//            
+//            makeItem(name: "Soft Cervical Collar", hcpcs: "L0120", size: "Universal",
+//                    qty: 28, category: "Cervical", clinicID: clinicID),
+//            
+//            makeItem(name: "Cane", hcpcs: "E0100", size: "N/A",
+//                    qty: 0, category: "Mobility Aids", clinicID: clinicID),
+//            
+//            makeItem(name: "Walker", hcpcs: "E0130", size: "N/A",
+//                    qty: 0, category: "Mobility Aids", clinicID: clinicID),
+//            
+//            makeItem(name: "Crutches", hcpcs: "E0110", size: "N/A",
+//                    qty: 0, category: "Mobility Aids", clinicID: clinicID),
+//            
+//            makeItem(name: "Abdominal Binder", hcpcs: "L0620", size: "Universal",
+//                    qty: 0, category: "Lumbar", clinicID: clinicID),
+//            
+//            makeItem(name: "SI Belt Coretech", hcpcs: "L0621", size: "Universal",
+//                    qty: 3, threshold: 5, category: "Lumbar", clinicID: clinicID),
+//            
+//            makeItem(name: "ROM Knee Brace", hcpcs: "L1832", size: "Universal",
+//                    qty: 0, category: "Orthopedic", clinicID: clinicID),
+//            
+//            makeItem(name: "OA Knee Brace", hcpcs: "L1843", size: "RT",
+//                    qty: 0, category: "Orthopedic", clinicID: clinicID),
+//            
+//            makeItem(name: "OA Knee Brace", hcpcs: "L1843", size: "LT",
+//                    qty: 0, category: "Orthopedic", clinicID: clinicID),
+//        ]
+//        
+//        for item in items {
+//            do {
+//                let _ = try await db.collection("inventory").addDocument(data: item)
+//                print("Added: \(item["name"] ?? "") (\(item["size"] ?? ""))")
+//            } catch {
+//                print("Error adding item: \(error)")
+//            }
+//        }
+//        
+//        print(" Added \(items.count) inventory items")
+//    }
     
     // Helper: build an item dictionary
     private func makeItem(

@@ -5,94 +5,107 @@
 //  Created by Mohamed Shahbain on 3/30/26.
 //
 
-// ContentView.swift
 import SwiftUI
 
 struct ContentView: View {
     @StateObject var seeder = DatabaseSeeder()
-    
+    @StateObject var catalogSeeder = CatalogSeeder()
+
     var body: some View {
         VStack(spacing: 24) {
-            
+
             Spacer()
-            
-            // App icon
+
             Image(systemName: "cross.case.fill")
                 .font(.system(size: 60))
                 .foregroundColor(.blue)
-            
-            Text("MedTrack")
+
+            Text("ClinicStock")
                 .font(.system(size: 34, weight: .bold, design: .rounded))
-            
+
             Text("Backend Setup")
                 .foregroundColor(.secondary)
-            
+
             Spacer()
-            
-            // Status message
+
+            // ── Database Seeder ──
             Text(seeder.status)
                 .font(.headline)
                 .foregroundColor(seeder.isComplete ? .green : .primary)
                 .multilineTextAlignment(.center)
-                .padding()
-            
-            // Seed button
-            if !seeder.isComplete {
-                Button {
-                    Task {
-                        await seeder.seedDatabase()
-                    }
-                } label: {
-                    if seeder.isSeeding {
-                        HStack {
-                            ProgressView()
-                                .tint(.white)
-                            Text("Setting up database...")
-                        }
-                        .frame(maxWidth: .infinity)
-                        .padding()
-                    } else {
-                        HStack {
-                            Image(systemName: "leaf.fill")
-                            Text("Set Up Database")
-                        }
-                        .frame(maxWidth: .infinity)
-                        .padding()
-                    }
-                }
-                .buttonStyle(.borderedProminent)
-                .tint(.green)
-                .disabled(seeder.isSeeding)
                 .padding(.horizontal, 32)
-            }
-            
-            // After seeding, show login info
-            if seeder.isComplete {
-                VStack(spacing: 12) {
-                    Text("Your test login:")
-                        .font(.headline)
-                    
-                    VStack(alignment: .leading, spacing: 8) {
-                        HStack {
-                            Text("Email:")
-                                .foregroundColor(.secondary)
-                            Text("admin@medtrack.com")
-                                .fontWeight(.medium)
-                        }
-                        HStack {
-                            Text("Password:")
-                                .foregroundColor(.secondary)
-                            Text("Test1234!")
-                                .fontWeight(.medium)
-                        }
+
+            Button {
+                Task { await seeder.seedDatabase() }
+            } label: {
+                if seeder.isSeeding {
+                    HStack {
+                        ProgressView().tint(.white)
+                        Text("Setting up database...")
                     }
+                    .frame(maxWidth: .infinity)
                     .padding()
-                    .background(Color.gray.opacity(0.1))
-                    .cornerRadius(12)
+                } else {
+                    HStack {
+                        Image(systemName: "leaf.fill")
+                        Text("Set Up Database")
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding()
                 }
-                .padding(.horizontal, 32)
             }
-            
+            .buttonStyle(.borderedProminent)
+            .tint(.green)
+            .disabled(seeder.isSeeding || seeder.isComplete)
+            .padding(.horizontal, 32)
+
+            if seeder.isComplete {
+                VStack(spacing: 8) {
+                    Text("Login: admin@clinicstock.com / Test1234!")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            }
+
+            Divider()
+                .padding(.horizontal, 32)
+
+            // ── Catalog Seeder ──
+            Text(catalogSeeder.status)
+                .font(.headline)
+                .foregroundColor(catalogSeeder.isComplete ? .green : .primary)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 32)
+
+            if catalogSeeder.isSeeding {
+                ProgressView(value: Double(catalogSeeder.progress), total: Double(max(catalogSeeder.total, 1)))
+                    .padding(.horizontal, 32)
+            }
+
+            Button {
+                Task { await catalogSeeder.seedCatalog() }
+            } label: {
+                if catalogSeeder.isSeeding {
+                    HStack {
+                        ProgressView().tint(.white)
+                        Text("Seeding... \(catalogSeeder.progress)/\(catalogSeeder.total)")
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding()
+                } else {
+                    HStack {
+                        Image(systemName: "list.bullet.rectangle.fill")
+                        Text("Seed DME Catalog")
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding()
+                }
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(.blue)
+            .disabled(catalogSeeder.isSeeding || catalogSeeder.isComplete)
+            .padding(.horizontal, 32)
+
             Spacer()
         }
     }
