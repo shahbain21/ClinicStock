@@ -732,6 +732,7 @@ class CatalogSeeder: ObservableObject {
             "clinicalName": clinical,
             "commonNames": common,
             "category": category,
+            "gtins": [] as [String],
             "isActive": true,
             "lastUpdated": Timestamp(date: Date()),
             "sourceYear": 2026
