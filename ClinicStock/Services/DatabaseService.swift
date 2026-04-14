@@ -180,6 +180,15 @@ class DatabaseService {
 
         return try? snapshot.documents.first?.data(as: HCPCSCatalogItem.self)
     }
+    
+    // ── Get ALL catalog items (used by HCPCSSearchService for local cache) ──
+    func getAllCatalogItems() async throws -> [HCPCSCatalogItem] {
+        let snapshot = try await db.collection("hcpcsCatalog")
+            .getDocuments()
+        return snapshot.documents.compactMap {
+            try? $0.data(as: HCPCSCatalogItem.self)
+        }
+    }
 
     // ── Add GTIN to catalog item ──
     func addGTINToCatalog(code: String, gtin: String) async throws {

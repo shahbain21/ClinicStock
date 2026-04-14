@@ -4,8 +4,12 @@
 //
 //  Created by Mohamed Shahbain on 4/3/26.
 //
-//  Updated to use subcollection path:
-//  inventory/{clinicID}/items/{itemID}
+//  FIXES:
+//  - Added validClinicID() helper for consistent validation
+//  - Fixed checkOut clinicID guard logic
+//  - All methods now validate clinicID before proceeding
+//  - Added .noClinicAssigned error case
+//  - Added unitCost parameter to addNewItem
 //
 
 import Foundation
@@ -23,14 +27,27 @@ class InventoryManager: ObservableObject {
     private var inventoryListener: ListenerRegistration?
     private var logsListener: ListenerRegistration?
 
-    // Store clinicID so all operations know which clinic to touch
     private var currentClinicID: String?
 
     deinit {
         stopListening()
     }
 
-    // ── Start listening to a clinic's data ──
+    // ═══════════════════════════════════
+    // MARK: - CLINIC ID VALIDATION
+    // ═══════════════════════════════════
+
+    private func validClinicID(from user: AppUser) throws -> String {
+        guard !user.clinicID.isEmpty else {
+            throw AppError.noClinicAssigned
+        }
+        return user.clinicID
+    }
+
+    // ═══════════════════════════════════
+    // MARK: - LISTENERS
+    // ═══════════════════════════════════
+
     func startListening(clinicID: String) {
         stopListening()
         currentClinicID = clinicID
@@ -57,7 +74,6 @@ class InventoryManager: ObservableObject {
         print("Listening to clinic: \(clinicID)")
     }
 
-    // ── Stop listening ──
     func stopListening() {
         inventoryListener?.remove()
         logsListener?.remove()
@@ -76,9 +92,7 @@ class InventoryManager: ObservableObject {
             throw AppError.insufficientPermissions
         }
 
-        guard let clinicID = user.clinicID.isEmpty ? nil : user.clinicID else {
-            throw AppError.itemNotFound
-        }
+        let clinicID = try validClinicID(from: user)
 
         guard let item = try await dbService.getItem(
             itemID: itemID,
@@ -150,7 +164,7 @@ class InventoryManager: ObservableObject {
             throw AppError.voidWindowExpired
         }
 
-        let clinicID = user.clinicID
+        let clinicID = try validClinicID(from: user)
 
         guard let item = try await dbService.getItem(
             itemID: itemID,
@@ -194,7 +208,7 @@ class InventoryManager: ObservableObject {
             throw AppError.insufficientPermissions
         }
 
-        let clinicID = user.clinicID
+        let clinicID = try validClinicID(from: user)
 
         guard let item = try await dbService.getItem(
             itemID: itemID,
@@ -239,7 +253,7 @@ class InventoryManager: ObservableObject {
             throw AppError.insufficientPermissions
         }
 
-        let clinicID = user.clinicID
+        let clinicID = try validClinicID(from: user)
 
         guard let item = try await dbService.getItem(
             itemID: itemID,
@@ -280,13 +294,14 @@ class InventoryManager: ObservableObject {
         category: String,
         manufacturer: String,
         notes: String,
+        unitCost: Double = 0,
         by user: AppUser
     ) async throws {
         guard PermissionManager.canAddStock(role: user.role) else {
             throw AppError.insufficientPermissions
         }
 
-        let clinicID = user.clinicID
+        let clinicID = try validClinicID(from: user)
 
         if !barcode.isEmpty {
             let exists = try await dbService.barcodeExists(
@@ -308,7 +323,7 @@ class InventoryManager: ObservableObject {
             "clinicID": clinicID,
             "category": category,
             "manufacturer": manufacturer,
-            "unitCost": 0,
+            "unitCost": unitCost,
             "lastUpdatedBy": user.id ?? "",
             "lastUpdated": Timestamp(date: Date()),
             "dateAdded": Timestamp(date: Date()),
@@ -344,7 +359,7 @@ class InventoryManager: ObservableObject {
             throw AppError.insufficientPermissions
         }
 
-        let clinicID = user.clinicID
+        let clinicID = try validClinicID(from: user)
 
         guard let item = try await dbService.getItem(
             itemID: itemID,
@@ -387,7 +402,7 @@ class InventoryManager: ObservableObject {
             clinicID: clinicID
         )
     }
-    
+
     // ═══════════════════════════════════
     // MARK: - ERRORS
     // ═══════════════════════════════════
@@ -398,6 +413,7 @@ class InventoryManager: ObservableObject {
         case insufficientStock
         case duplicateBarcode
         case voidWindowExpired
+        case noClinicAssigned
 
         var errorDescription: String? {
             switch self {
@@ -411,6 +427,8 @@ class InventoryManager: ObservableObject {
                 return "An item with this barcode already exists."
             case .voidWindowExpired:
                 return "The 5-minute void window has expired. Contact an editor or above."
+            case .noClinicAssigned:
+                return "No clinic assigned to your account. Contact your admin."
             }
         }
     }

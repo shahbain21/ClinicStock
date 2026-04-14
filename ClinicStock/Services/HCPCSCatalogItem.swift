@@ -18,7 +18,29 @@ struct HCPCSCatalogItem: Codable, Identifiable, Hashable {
     var gtins: [String]?
     var isActive: Bool
     var sourceYear: Int
-    var lastUpdated: Timestamp
+    var lastUpdated: Date
+    
+       init(
+           id: String? = nil,
+           hcpcsCode: String,
+           clinicalName: String,
+           commonNames: [String],
+           category: String,
+           gtins: [String]? = nil,
+           isActive: Bool = true,
+           sourceYear: Int = 2026,
+           lastUpdated: Date = Date()
+       ) {
+           self.id = id
+           self.hcpcsCode = hcpcsCode
+           self.clinicalName = clinicalName
+           self.commonNames = commonNames
+           self.category = category
+           self.gtins = gtins
+           self.isActive = isActive
+           self.sourceYear = sourceYear
+           self.lastUpdated = lastUpdated
+       }
 
     // ── Hashable ──
     func hash(into hasher: inout Hasher) {

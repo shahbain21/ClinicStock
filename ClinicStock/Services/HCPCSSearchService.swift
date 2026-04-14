@@ -2,10 +2,12 @@
 //  HCPCSSearchService.swift
 //  ClinicStock
 //
-//  Loads all 96 catalog items once on init.
-//  All text search is done client-side — instant partial matching.
-//  NLM API only hits when a search term has zero local matches.
-//  GTIN lookup always hits Firestore directly.
+//  FIXES:
+//  - NLM results now saved to Firestore via DatabaseService
+//  - Routed Firestore operations through DatabaseService where practical
+//  - loadCatalog uses DatabaseService.getAllCatalogItems()
+//  - confirmAndSaveGTIN uses DatabaseService
+//  - saveCommonName uses DatabaseService
 //
 
 import Foundation
@@ -23,7 +25,7 @@ class HCPCSSearchService: ObservableObject {
     // Full catalog loaded once into memory
     private var catalog: [HCPCSCatalogItem] = []
 
-    private let db = Firestore.firestore()
+    private let dbService = DatabaseService.shared
     private let nlmBaseURL = "https://clinicaltables.nlm.nih.gov/api/hcpcs/v3/search"
 
     init() {
@@ -39,19 +41,12 @@ class HCPCSSearchService: ObservableObject {
     func loadCatalog() async {
         print("Starting catalog load...")
         do {
-            let snapshot = try await db.collection("hcpcsCatalog")
-                .getDocuments()
-            
-            print("Snapshot count: \(snapshot.documents.count)")
-            
-            catalog = snapshot.documents.compactMap {
-                try? $0.data(as: HCPCSCatalogItem.self)
-            }
-            
+            catalog = try await dbService.getAllCatalogItems()
             print("Catalog loaded: \(catalog.count) items")
             isLoaded = true
         } catch {
             print("Failed to load catalog: \(error.localizedDescription)")
+            errorMessage = "Failed to load catalog"
         }
     }
 
@@ -109,18 +104,24 @@ class HCPCSSearchService: ObservableObject {
                 return .found(item, gtin: gtin)
             }
 
-            // Not in local catalog — check Firestore in case another
-            // device added this GTIN after our local load
-            if let item = await lookupGTINFromFirestore(gtin) {
-                if let index = catalog.firstIndex(where: {
-                    $0.hcpcsCode == item.hcpcsCode
-                }) {
-                    catalog[index] = item
+            // Not in local catalog — check Firestore
+            do {
+                if let item = try await dbService.getCatalogItemByGTIN(gtin: gtin) {
+                    // Update local cache
+                    if let index = catalog.firstIndex(where: {
+                        $0.hcpcsCode == item.hcpcsCode
+                    }) {
+                        catalog[index] = item
+                    } else {
+                        catalog.append(item)
+                    }
+                    return .found(item, gtin: gtin)
                 }
-                return .found(item, gtin: gtin)
+            } catch {
+                print("GTIN Firestore lookup error: \(error)")
             }
 
-            // GTIN not found anywhere — return so UI can prompt confirmation
+            // GTIN not found anywhere
             return .gtinNotFound(gtin: gtin, parsed: parsed)
         }
 
@@ -133,21 +134,22 @@ class HCPCSSearchService: ObservableObject {
 
     func confirmAndSaveGTIN(gtin: String, forItem item: HCPCSCatalogItem) async {
         do {
-            try await db.collection("hcpcsCatalog")
-                .document(item.hcpcsCode.uppercased())
-                .updateData([
-                    "gtins": FieldValue.arrayUnion([gtin])
-                ])
+            try await dbService.addGTINToCatalog(
+                code: item.hcpcsCode,
+                gtin: gtin
+            )
 
             // Update local cache immediately
             if let index = catalog.firstIndex(where: {
                 $0.hcpcsCode == item.hcpcsCode
             }) {
                 var updated = catalog[index]
-                if updated.gtins == nil || updated.gtins?.contains(gtin) == false {
+                if updated.gtins == nil {
+                    updated.gtins = [gtin]
+                } else if updated.gtins?.contains(gtin) == false {
                     updated.gtins?.append(gtin)
-                    catalog[index] = updated
                 }
+                catalog[index] = updated
             }
 
             print("GTIN \(gtin) saved to \(item.hcpcsCode)")
@@ -165,11 +167,10 @@ class HCPCSSearchService: ObservableObject {
         guard !normalized.isEmpty else { return }
 
         do {
-            try await db.collection("hcpcsCatalog")
-                .document(code.uppercased())
-                .updateData([
-                    "commonNames": FieldValue.arrayUnion([normalized])
-                ])
+            try await dbService.addCommonNameToCatalog(
+                code: code,
+                name: normalized
+            )
 
             if let index = catalog.firstIndex(where: {
                 $0.hcpcsCode.uppercased() == code.uppercased()
@@ -215,7 +216,6 @@ class HCPCSSearchService: ObservableObject {
 
     // ══════════════════════════════════════════════════════
     // MARK: - Private: local search
-    // Partial match on commonNames, clinicalName, hcpcsCode
     // ══════════════════════════════════════════════════════
 
     private func searchLocally(query: String) -> [HCPCSCatalogItem] {
@@ -241,25 +241,8 @@ class HCPCSSearchService: ObservableObject {
     }
 
     // ══════════════════════════════════════════════════════
-    // MARK: - Private: Firestore GTIN lookup
-    // ══════════════════════════════════════════════════════
-
-    private func lookupGTINFromFirestore(_ gtin: String) async -> HCPCSCatalogItem? {
-        do {
-            let snapshot = try await db.collection("hcpcsCatalog")
-                .whereField("gtins", arrayContains: gtin)
-                .limit(to: 1)
-                .getDocuments()
-
-            return try? snapshot.documents.first?.data(as: HCPCSCatalogItem.self)
-        } catch {
-            print("GTIN Firestore lookup error: \(error)")
-            return nil
-        }
-    }
-
-    // ══════════════════════════════════════════════════════
     // MARK: - Private: NLM fallback
+    // Now saves new items to Firestore for future searches
     // ══════════════════════════════════════════════════════
 
     private func searchNLM(query: String) async -> [HCPCSCatalogItem] {
@@ -281,18 +264,22 @@ class HCPCSSearchService: ObservableObject {
                   let pairs = json[3] as? [[String]]
             else { return [] }
 
-            return pairs.compactMap { pair -> HCPCSCatalogItem? in
-                guard pair.count >= 2 else { return nil }
+            var newItems: [HCPCSCatalogItem] = []
+
+            for pair in pairs {
+                guard pair.count >= 2 else { continue }
                 let code = pair[0]
                 let clinical = pair[1]
-                guard isDMECode(code) else { return nil }
+                guard isDMECode(code) else { continue }
 
                 // Return from local cache if already exists
                 if let existing = catalog.first(where: { $0.hcpcsCode == code }) {
-                    return existing
+                    newItems.append(existing)
+                    continue
                 }
 
-                return HCPCSCatalogItem(
+                // Create new item
+                let item = HCPCSCatalogItem(
                     hcpcsCode: code,
                     clinicalName: clinical,
                     commonNames: [query.lowercased()],
@@ -300,9 +287,33 @@ class HCPCSSearchService: ObservableObject {
                     gtins: [],
                     isActive: true,
                     sourceYear: 2026,
-                    lastUpdated: Timestamp()
+                    lastUpdated: Date()
                 )
+
+                newItems.append(item)
+
+                // Save to Firestore so future searches find it locally
+                do {
+                    try await dbService.saveCatalogItem([
+                        "hcpcsCode": code,
+                        "clinicalName": clinical,
+                        "commonNames": [query.lowercased()],
+                        "category": categoryForCode(code),
+                        "gtins": [] as [String],
+                        "isActive": true,
+                        "sourceYear": 2026,
+                        "lastUpdated": Timestamp(date: Date())
+                    ])
+
+                    // Add to local cache
+                    catalog.append(item)
+                    print("Saved NLM result to catalog: \(code)")
+                } catch {
+                    print("Failed to save NLM result \(code): \(error)")
+                }
             }
+
+            return newItems
 
         } catch {
             print("NLM error: \(error)")
