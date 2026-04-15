@@ -9,15 +9,30 @@
 /* Begin PBXBuildFile section */
 		817506842F7FF1C700825DB8 /* FirebaseAuth in Frameworks */ = {isa = PBXBuildFile; productRef = 817506832F7FF1C700825DB8 /* FirebaseAuth */; };
 		817506862F7FF1C700825DB8 /* FirebaseFirestore in Frameworks */ = {isa = PBXBuildFile; productRef = 817506852F7FF1C700825DB8 /* FirebaseFirestore */; };
+		817507882F8E78B700825DB8 /* GoogleSignIn in Frameworks */ = {isa = PBXBuildFile; productRef = 817507872F8E78B700825DB8 /* GoogleSignIn */; };
+		8175078A2F8E78B700825DB8 /* GoogleSignInSwift in Frameworks */ = {isa = PBXBuildFile; productRef = 817507892F8E78B700825DB8 /* GoogleSignInSwift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
 		817506602F7AC69000825DB8 /* ClinicStock.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = ClinicStock.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
+/* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
+		817507912F8E883800825DB8 /* Exceptions for "ClinicStock" folder in "ClinicStock" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Info.plist,
+			);
+			target = 8175065F2F7AC69000825DB8 /* ClinicStock */;
+		};
+/* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
+
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		817506622F7AC69000825DB8 /* ClinicStock */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				817507912F8E883800825DB8 /* Exceptions for "ClinicStock" folder in "ClinicStock" target */,
+			);
 			path = ClinicStock;
 			sourceTree = "<group>";
 		};
@@ -30,6 +45,8 @@
 			files = (
 				817506842F7FF1C700825DB8 /* FirebaseAuth in Frameworks */,
 				817506862F7FF1C700825DB8 /* FirebaseFirestore in Frameworks */,
+				817507882F8E78B700825DB8 /* GoogleSignIn in Frameworks */,
+				8175078A2F8E78B700825DB8 /* GoogleSignInSwift in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -74,6 +91,8 @@
 			packageProductDependencies = (
 				817506832F7FF1C700825DB8 /* FirebaseAuth */,
 				817506852F7FF1C700825DB8 /* FirebaseFirestore */,
+				817507872F8E78B700825DB8 /* GoogleSignIn */,
+				817507892F8E78B700825DB8 /* GoogleSignInSwift */,
 			);
 			productName = ClinicStock;
 			productReference = 817506602F7AC69000825DB8 /* ClinicStock.app */;
@@ -105,6 +124,7 @@
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
 				817506822F7FF1C700825DB8 /* XCRemoteSwiftPackageReference "firebase-ios-sdk" */,
+				817507862F8E78B700825DB8 /* XCRemoteSwiftPackageReference "GoogleSignIn-iOS" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 817506612F7AC69000825DB8 /* Products */;
@@ -261,11 +281,13 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = ClinicStock/ClinicStock.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = 7C7WV8TT97;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = ClinicStock/Info.plist;
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
@@ -293,12 +315,14 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = ClinicStock/ClinicStock.entitlements;
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = 7C7WV8TT97;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = ClinicStock/Info.plist;
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
@@ -354,6 +378,14 @@
 				minimumVersion = 12.11.0;
 			};
 		};
+		817507862F8E78B700825DB8 /* XCRemoteSwiftPackageReference "GoogleSignIn-iOS" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/google/GoogleSignIn-iOS";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 9.1.0;
+			};
+		};
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
@@ -366,6 +398,16 @@
 			isa = XCSwiftPackageProductDependency;
 			package = 817506822F7FF1C700825DB8 /* XCRemoteSwiftPackageReference "firebase-ios-sdk" */;
 			productName = FirebaseFirestore;
+		};
+		817507872F8E78B700825DB8 /* GoogleSignIn */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 817507862F8E78B700825DB8 /* XCRemoteSwiftPackageReference "GoogleSignIn-iOS" */;
+			productName = GoogleSignIn;
+		};
+		817507892F8E78B700825DB8 /* GoogleSignInSwift */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 817507862F8E78B700825DB8 /* XCRemoteSwiftPackageReference "GoogleSignIn-iOS" */;
+			productName = GoogleSignInSwift;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

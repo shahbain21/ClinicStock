@@ -2,63 +2,63 @@
 //  AppTheme.swift
 //  ClinicStock
 //
-//  Created by Mohamed Shahbain on 4/13/26.
+//  Created by Mohamed Shahbain
 //
-
 //  Central design system — colors, fonts, spacing, and reusable components.
 //  Every view in the app should reference this file for consistency.
+//  Supports both Light and Dark mode.
 //
 
 import SwiftUI
 
 // ══════════════════════════════════════════════════════
-// MARK: - Colors
+// MARK: - Colors (Adaptive Light/Dark)
 // ══════════════════════════════════════════════════════
 
 struct AppColors {
 
     // ── Primary ──
-    static let primary = Color(hex: "1B2A4A")         // Dark navy — buttons, tab bar, headers
-    static let primaryLight = Color(hex: "2A4070")     // Lighter navy — hover states, accents
-    static let primaryDark = Color(hex: "111D35")      // Deeper navy — pressed states
+    static let primary = Color.adaptive(light: "1B2A4A", dark: "E2E8F0")
+    static let primaryLight = Color.adaptive(light: "2A4070", dark: "94A3B8")
+    static let primaryDark = Color.adaptive(light: "111D35", dark: "F1F5F9")
 
-    // ── Accent ──
-    static let accent = Color(hex: "3B82F6")           // Blue — links, secondary actions
-    static let accentLight = Color(hex: "DBEAFE")      // Light blue — selected backgrounds
+    // ── Accent (stays blue in both modes) ──
+    static let accent = Color.adaptive(light: "3B82F6", dark: "60A5FA")
+    static let accentLight = Color.adaptive(light: "DBEAFE", dark: "1E3A5F")
 
     // ── Backgrounds ──
-    static let background = Color(hex: "F5F6FA")       // Light gray — main app background
-    static let cardBackground = Color.white            // Cards, sheets
-    static let inputBackground = Color(hex: "F9FAFB")  // Text field fill
+    static let background = Color.adaptive(light: "F5F6FA", dark: "0F1117")
+    static let cardBackground = Color.adaptive(light: "FFFFFF", dark: "1A1D27")
+    static let inputBackground = Color.adaptive(light: "F9FAFB", dark: "1E2130")
 
     // ── Text ──
-    static let textPrimary = Color(hex: "1F2937")      // Near black — headings, body
-    static let textSecondary = Color(hex: "6B7280")    // Gray — subtitles, placeholders
-    static let textTertiary = Color(hex: "9CA3AF")     // Light gray — hints, timestamps
-    static let textOnPrimary = Color.white             // Text on dark backgrounds
+    static let textPrimary = Color.adaptive(light: "1F2937", dark: "F1F5F9")
+    static let textSecondary = Color.adaptive(light: "6B7280", dark: "94A3B8")
+    static let textTertiary = Color.adaptive(light: "9CA3AF", dark: "64748B")
+    static let textOnPrimary = Color.white
 
     // ── Status ──
-    static let success = Color(hex: "22C55E")          // Green — item found, in stock
-    static let successLight = Color(hex: "DCFCE7")     // Light green background
-    static let warning = Color(hex: "F59E0B")          // Amber — low stock warning
-    static let warningLight = Color(hex: "FEF3C7")     // Light amber background
-    static let danger = Color(hex: "EF4444")           // Red — out of stock, alerts, delete
-    static let dangerLight = Color(hex: "FEE2E2")      // Light red background
+    static let success = Color.adaptive(light: "22C55E", dark: "4ADE80")
+    static let successLight = Color.adaptive(light: "DCFCE7", dark: "14532D")
+    static let warning = Color.adaptive(light: "F59E0B", dark: "FBBF24")
+    static let warningLight = Color.adaptive(light: "FEF3C7", dark: "713F12")
+    static let danger = Color.adaptive(light: "EF4444", dark: "F87171")
+    static let dangerLight = Color.adaptive(light: "FEE2E2", dark: "7F1D1D")
 
     // ── Borders ──
-    static let border = Color(hex: "E5E7EB")          // Input borders, dividers
-    static let borderFocused = Color(hex: "3B82F6")    // Focused input border
+    static let border = Color.adaptive(light: "E5E7EB", dark: "2D3748")
+    static let borderFocused = Color.adaptive(light: "3B82F6", dark: "60A5FA")
 
-    // ── Role Colors ──
-    static let roleAdmin = Color(hex: "EF4444")        // Red
-    static let roleManager = Color(hex: "8B5CF6")      // Purple
-    static let roleEditor = Color(hex: "3B82F6")       // Blue
-    static let roleStaff = Color(hex: "6B7280")        // Gray
+    // ── Role Colors (same in both modes) ──
+    static let roleAdmin = Color(hex: "EF4444")
+    static let roleManager = Color(hex: "8B5CF6")
+    static let roleEditor = Color(hex: "3B82F6")
+    static let roleStaff = Color(hex: "6B7280")
 
     // ── Tab Bar ──
-    static let tabBarBackground = Color(hex: "1B2A4A") // Dark navy
-    static let tabBarActive = Color.white              // Active tab icon
-    static let tabBarInactive = Color(hex: "7B8DB0")   // Inactive tab icon
+    static let tabBarBackground = Color.adaptive(light: "1B2A4A", dark: "111827")
+    static let tabBarActive = Color.white
+    static let tabBarInactive = Color.adaptive(light: "7B8DB0", dark: "4B5563")
 }
 
 // ══════════════════════════════════════════════════════
@@ -87,7 +87,7 @@ struct AppFonts {
     static let footnote = Font.system(size: 12, weight: .regular)
     static let footnoteMedium = Font.system(size: 12, weight: .medium)
 
-    // ── Numbers (for quantities) ──
+    // ── Numbers ──
     static let quantityLarge = Font.system(size: 32, weight: .bold, design: .rounded)
     static let quantityMedium = Font.system(size: 22, weight: .bold, design: .rounded)
     static let quantitySmall = Font.system(size: 18, weight: .bold, design: .rounded)
@@ -117,7 +117,7 @@ struct AppRadius {
     static let medium: CGFloat = 12
     static let large: CGFloat = 16
     static let xl: CGFloat = 20
-    static let full: CGFloat = 100     // Pill shape
+    static let full: CGFloat = 100
 }
 
 // ══════════════════════════════════════════════════════
@@ -125,9 +125,32 @@ struct AppRadius {
 // ══════════════════════════════════════════════════════
 
 struct AppShadow {
-    static let small = Shadow(color: .black.opacity(0.05), radius: 4, y: 2)
-    static let medium = Shadow(color: .black.opacity(0.08), radius: 8, y: 4)
-    static let large = Shadow(color: .black.opacity(0.12), radius: 16, y: 8)
+
+    @Environment(\.colorScheme) static var colorScheme
+
+    static var small: Shadow {
+        Shadow(
+            color: .black.opacity(colorScheme == .dark ? 0.3 : 0.05),
+            radius: 4,
+            y: 2
+        )
+    }
+
+    static var medium: Shadow {
+        Shadow(
+            color: .black.opacity(colorScheme == .dark ? 0.4 : 0.08),
+            radius: 8,
+            y: 4
+        )
+    }
+
+    static var large: Shadow {
+        Shadow(
+            color: .black.opacity(colorScheme == .dark ? 0.5 : 0.12),
+            radius: 16,
+            y: 8
+        )
+    }
 
     struct Shadow {
         let color: Color
@@ -167,10 +190,24 @@ extension Color {
 }
 
 // ══════════════════════════════════════════════════════
+// MARK: - Adaptive Color Extension
+// Creates a Color that adapts to light/dark mode
+// ══════════════════════════════════════════════════════
+
+extension Color {
+    static func adaptive(light: String, dark: String) -> Color {
+        Color(UIColor { traitCollection in
+            traitCollection.userInterfaceStyle == .dark
+                ? UIColor(Color(hex: dark))
+                : UIColor(Color(hex: light))
+        })
+    }
+}
+
+// ══════════════════════════════════════════════════════
 // MARK: - REUSABLE BUTTON STYLES
 // ══════════════════════════════════════════════════════
 
-// ── Primary Button — dark navy, full width ──
 struct PrimaryButtonStyle: ButtonStyle {
     var isDisabled: Bool = false
 
@@ -190,7 +227,6 @@ struct PrimaryButtonStyle: ButtonStyle {
     }
 }
 
-// ── Secondary Button — outlined ──
 struct SecondaryButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
@@ -208,7 +244,6 @@ struct SecondaryButtonStyle: ButtonStyle {
     }
 }
 
-// ── Danger Button — red, for delete/cancel ──
 struct DangerButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
@@ -226,7 +261,6 @@ struct DangerButtonStyle: ButtonStyle {
     }
 }
 
-// ── Small Pill Button — for inline actions ──
 struct PillButtonStyle: ButtonStyle {
     var color: Color = AppColors.primary
 
@@ -295,6 +329,49 @@ struct AppTextField: View {
     }
 }
 
+// ── Underline Text Field (login screens) ──
+struct UnderlineTextField: View {
+    let title: String
+    var placeholder: String = ""
+    @Binding var text: String
+    var isSecure: Bool = false
+    var keyboardType: UIKeyboardType = .default
+
+    @State private var isPasswordVisible = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: AppSpacing.sm) {
+            Text(title)
+                .font(AppFonts.bodySemibold)
+                .foregroundColor(AppColors.textPrimary)
+
+            HStack {
+                if isSecure && !isPasswordVisible {
+                    SecureField(placeholder, text: $text)
+                        .font(AppFonts.body)
+                } else {
+                    TextField(placeholder, text: $text)
+                        .font(AppFonts.body)
+                        .keyboardType(keyboardType)
+                        .autocapitalization(.none)
+                        .autocorrectionDisabled()
+                }
+
+                if isSecure {
+                    Button(action: { isPasswordVisible.toggle() }) {
+                        Image(systemName: isPasswordVisible ? "eye.slash" : "eye")
+                            .foregroundColor(AppColors.textTertiary)
+                            .font(.system(size: 16))
+                    }
+                }
+            }
+
+            Divider()
+                .background(AppColors.border)
+        }
+    }
+}
+
 // ── Card Container ──
 struct AppCard<Content: View>: View {
     var padding: CGFloat = AppSpacing.lg
@@ -309,12 +386,8 @@ struct AppCard<Content: View>: View {
         .background(
             RoundedRectangle(cornerRadius: AppRadius.large)
                 .fill(AppColors.cardBackground)
-                .shadow(
-                    color: AppShadow.small.color,
-                    radius: AppShadow.small.radius,
-                    y: AppShadow.small.y
-                )
         )
+        .cardShadow()
     }
 }
 
@@ -546,12 +619,8 @@ struct InventoryRowView: View {
         .background(
             RoundedRectangle(cornerRadius: AppRadius.medium)
                 .fill(AppColors.cardBackground)
-                .shadow(
-                    color: AppShadow.small.color,
-                    radius: AppShadow.small.radius,
-                    y: AppShadow.small.y
-                )
         )
+        .cardShadow()
     }
 }
 
@@ -576,12 +645,8 @@ struct StatCard: View {
         .background(
             RoundedRectangle(cornerRadius: AppRadius.medium)
                 .fill(AppColors.cardBackground)
-                .shadow(
-                    color: AppShadow.small.color,
-                    radius: AppShadow.small.radius,
-                    y: AppShadow.small.y
-                )
         )
+        .cardShadow()
     }
 }
 
@@ -644,7 +709,6 @@ struct LoadingOverlay: View {
 // MARK: - VIEW MODIFIERS
 // ══════════════════════════════════════════════════════
 
-// ── Standard screen background ──
 struct AppBackgroundModifier: ViewModifier {
     func body(content: Content) -> some View {
         content
@@ -652,14 +716,17 @@ struct AppBackgroundModifier: ViewModifier {
     }
 }
 
-// ── Card shadow ──
 struct CardShadowModifier: ViewModifier {
+    @Environment(\.colorScheme) var colorScheme
+
     func body(content: Content) -> some View {
         content
             .shadow(
-                color: AppShadow.small.color,
-                radius: AppShadow.small.radius,
-                y: AppShadow.small.y
+                color: colorScheme == .dark
+                    ? .black.opacity(0.3)
+                    : .black.opacity(0.05),
+                radius: 4,
+                y: 2
             )
     }
 }
@@ -675,61 +742,45 @@ extension View {
 }
 
 // ══════════════════════════════════════════════════════
-// MARK: - PREVIEW HELPERS
+// MARK: - PREVIEWS
 // ══════════════════════════════════════════════════════
 
-#Preview("Buttons") {
-    VStack(spacing: 16) {
-        Button("Sign In") {}
-            .buttonStyle(PrimaryButtonStyle())
-
-        Button("Register") {}
-            .buttonStyle(SecondaryButtonStyle())
-
-        Button("Delete Item") {}
-            .buttonStyle(DangerButtonStyle())
-
-        Button("Add Stock") {}
-            .buttonStyle(PillButtonStyle())
-
-        Button("Low Stock") {}
-            .buttonStyle(PillButtonStyle(color: AppColors.danger))
-    }
-    .padding()
-}
-
-#Preview("Components") {
+#Preview("Light Mode") {
     ScrollView {
         VStack(spacing: 20) {
             AppSearchBar(text: .constant(""))
-
             StatCard(title: "Total Items", value: "1,346")
-
             LowStockBanner(count: 5)
-
             StatusBadge(text: "Item Found", color: AppColors.success, icon: "checkmark.circle.fill")
-
-            RoleBadge(role: .admin)
-            RoleBadge(role: .manager)
-            RoleBadge(role: .editor)
-            RoleBadge(role: .staff)
-
             HStack {
-                UserAvatar(name: "John Doe", role: .admin)
-                UserAvatar(name: "Sarah Smith", role: .manager)
-                UserAvatar(name: "Mike Lee", role: .editor)
-                UserAvatar(name: "Anna Bell", role: .staff)
+                RoleBadge(role: .admin)
+                RoleBadge(role: .manager)
+                RoleBadge(role: .editor)
+                RoleBadge(role: .staff)
             }
-
-            EmptyStateView(
-                icon: "shippingbox",
-                title: "No Items",
-                message: "Start by adding inventory items",
-                buttonTitle: "Add Item",
-                onAction: {}
-            )
         }
         .padding()
     }
     .appBackground()
+    .preferredColorScheme(.light)
+}
+
+#Preview("Dark Mode") {
+    ScrollView {
+        VStack(spacing: 20) {
+            AppSearchBar(text: .constant(""))
+            StatCard(title: "Total Items", value: "1,346")
+            LowStockBanner(count: 5)
+            StatusBadge(text: "Item Found", color: AppColors.success, icon: "checkmark.circle.fill")
+            HStack {
+                RoleBadge(role: .admin)
+                RoleBadge(role: .manager)
+                RoleBadge(role: .editor)
+                RoleBadge(role: .staff)
+            }
+        }
+        .padding()
+    }
+    .appBackground()
+    .preferredColorScheme(.dark)
 }

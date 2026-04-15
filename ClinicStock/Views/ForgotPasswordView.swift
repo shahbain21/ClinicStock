@@ -2,14 +2,12 @@
 //  ForgotPasswordView.swift
 //  ClinicStock
 //
-//  Created by Mohamed Shahbain on 4/13/26.
-//
-
-//
-//  ForgotPasswordView.swift
-//  ClinicStock
-//
 //  Created by Mohamed Shahbain
+//
+//  UPDATED:
+//  - Dark mode support
+//  - Keyboard dismiss
+//  - Consistent color tokens
 //
 
 import SwiftUI
@@ -27,8 +25,14 @@ struct ForgotPasswordView: View {
     var body: some View {
         VStack(spacing: 0) {
 
+            // ── Drag Indicator ──
+            Capsule()
+                .fill(AppColors.border)
+                .frame(width: 40, height: 5)
+                .padding(.top, AppSpacing.md)
+
             Spacer()
-                .frame(height: 100)
+                .frame(height: 80)
 
             // ── Header ──
             VStack(spacing: AppSpacing.md) {
@@ -62,6 +66,7 @@ struct ForgotPasswordView: View {
                 .foregroundColor(AppColors.danger)
                 .padding(.horizontal, AppSpacing.xxl)
                 .padding(.top, AppSpacing.lg)
+                .transition(.opacity.combined(with: .move(edge: .top)))
             }
 
             // ── Success Message ──
@@ -75,6 +80,7 @@ struct ForgotPasswordView: View {
                 .foregroundColor(AppColors.success)
                 .padding(.horizontal, AppSpacing.xxl)
                 .padding(.top, AppSpacing.lg)
+                .transition(.opacity.combined(with: .move(edge: .top)))
             }
 
             // ── Send Reset Button ──
@@ -99,21 +105,29 @@ struct ForgotPasswordView: View {
             Button(action: { dismiss() }) {
                 Text("Back To Login Page")
                     .font(AppFonts.captionSemibold)
-                    .foregroundColor(AppColors.primary)
+                    .foregroundColor(AppColors.accent)
                     .underline()
             }
             .padding(.bottom, AppSpacing.xxxl)
         }
+        .animation(.easeInOut(duration: 0.3), value: showSuccess)
+        .animation(.easeInOut(duration: 0.3), value: errorMessage)
         .appBackground()
     }
 
-    // ── Validation ──
+    // ══════════════════════════════════════════════════════
+    // MARK: - Validation
+    // ══════════════════════════════════════════════════════
+
     private var isFormValid: Bool {
         !email.trimmingCharacters(in: .whitespaces).isEmpty &&
         email.contains("@")
     }
 
-    // ── Send Reset Action ──
+    // ══════════════════════════════════════════════════════
+    // MARK: - Send Reset Action
+    // ══════════════════════════════════════════════════════
+
     private func sendReset() {
         isSending = true
         errorMessage = nil
@@ -145,6 +159,21 @@ struct ForgotPasswordView: View {
     }
 }
 
+// ══════════════════════════════════════════════════════
+// MARK: - Preview
+// ══════════════════════════════════════════════════════
+
+#Preview("Light") {
+    ForgotPasswordView()
+        .environmentObject(AuthManager())
+        .preferredColorScheme(.light)
+}
+
+#Preview("Dark") {
+    ForgotPasswordView()
+        .environmentObject(AuthManager())
+        .preferredColorScheme(.dark)
+}
 // ══════════════════════════════════════════════════════
 // MARK: - Preview
 // ══════════════════════════════════════════════════════
