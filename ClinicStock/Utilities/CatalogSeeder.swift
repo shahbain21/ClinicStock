@@ -28,19 +28,19 @@ class CatalogSeeder: ObservableObject {
             isSeeding = true
             status = "Building catalog..."
         }
-
+        
         let codes = allDMECodes()
-
+        
         await MainActor.run {
             self.total = codes.count
             self.progress = 0
         }
-
+        
         await updateStatus("Seeding \(codes.count) DME codes...")
-
+        
         var successCount = 0
         var failCount = 0
-
+        
         for entry in codes {
             let code = entry["hcpcsCode"] as? String ?? "unknown"
             do {
@@ -53,18 +53,18 @@ class CatalogSeeder: ObservableObject {
                 print("Failed to seed \(code): \(error)")
                 failCount += 1
             }
-
+            
             await MainActor.run {
                 self.progress += 1
             }
         }
-
+        
         await MainActor.run {
             self.isSeeding = false
             self.isComplete = true
             self.status = "Done — \(successCount) codes seeded, \(failCount) failed"
         }
-
+        
         print("Catalog seeding complete: \(successCount) success, \(failCount) failed")
     }
 

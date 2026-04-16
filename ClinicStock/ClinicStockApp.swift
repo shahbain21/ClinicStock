@@ -20,11 +20,18 @@ class AppDelegate: NSObject, UIApplicationDelegate {
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
     ) -> Bool {
         FirebaseApp.configure()
-        print("Firebase connected")
+
+        // Configure Google Sign-In from GoogleService-Info.plist
+        if let clientID = FirebaseApp.app()?.options.clientID {
+            GIDSignIn.sharedInstance.configuration = GIDConfiguration(clientID: clientID)
+            print("Google Sign-In configured with client ID")
+        } else {
+            print("No client ID found — check GoogleService-Info.plist")
+        }
+
         return true
     }
 
-    // Handle Google Sign-In redirect URL
     func application(
         _ app: UIApplication,
         open url: URL,

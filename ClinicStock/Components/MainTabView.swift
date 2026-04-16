@@ -332,10 +332,15 @@ struct SettingsPlaceholder: View {
                 if authManager.currentUser?.role == .admin {
                     Section("Admin") {
                         NavigationLink {
-                            // UserManagementView() — will build
-                            Text("User Management")
+                            UserManagementView()
                         } label: {
                             Label("User Management", systemImage: "person.2.fill")
+                        }
+
+                        NavigationLink {
+                            ContentView()  // Database seeder tool
+                        } label: {
+                            Label("Database Tools", systemImage: "wrench.and.screwdriver.fill")
                         }
                     }
                 }

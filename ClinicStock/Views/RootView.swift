@@ -4,8 +4,10 @@
 //
 //  Created by Mohamed Shahbain
 //
-//  Root auth gate — decides which screen to show.
-//  Also starts/stops inventory listener when auth changes.
+//  FIXED:
+//  - Uses .onChange to watch for currentUser being set
+//  - Starts listening as soon as clinicID is available
+//  - Stops listening on sign out
 //
 
 import SwiftUI
@@ -18,34 +20,38 @@ struct RootView: View {
     var body: some View {
         Group {
             if authManager.isLoading {
-                // ── Splash Screen ──
                 SplashView()
 
             } else if authManager.isAuthenticated {
-                // ── Main App ──
                 MainTabView()
-                    .onAppear {
-                        startListening()
-                    }
-                    .onChange(of: authManager.isAuthenticated) { _, isAuth in
-                        if !isAuth {
-                            inventoryManager.stopListening()
-                        }
-                    }
 
             } else {
-                // ── Login ──
                 LoginView()
             }
         }
-    }
-
-    private func startListening() {
-        guard let clinicID = authManager.currentUser?.clinicID,
-              !clinicID.isEmpty
-        else { return }
-
-        inventoryManager.startListening(clinicID: clinicID)
+        // ── Start listening when user is loaded ──
+        .onChange(of: authManager.currentUser?.clinicID) { _, clinicID in
+            if let clinicID = clinicID, !clinicID.isEmpty {
+                print("Starting inventory listener for clinic: \(clinicID)")
+                inventoryManager.startListening(clinicID: clinicID)
+            }
+        }
+        // ── Stop listening on sign out ──
+        .onChange(of: authManager.isAuthenticated) { _, isAuth in
+            if !isAuth {
+                print("User signed out — stopping listeners")
+                inventoryManager.stopListening()
+            }
+        }
+        // ── Also try on appear (in case onChange missed it) ──
+        .onAppear {
+            if let clinicID = authManager.currentUser?.clinicID,
+               !clinicID.isEmpty,
+               inventoryManager.items.isEmpty {
+                print("onAppear — starting inventory listener")
+                inventoryManager.startListening(clinicID: clinicID)
+            }
+        }
     }
 }
 

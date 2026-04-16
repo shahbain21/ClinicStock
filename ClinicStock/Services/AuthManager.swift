@@ -27,7 +27,7 @@ class AuthManager: ObservableObject {
     @Published var currentUser: AppUser?
     @Published var currentClinic: Clinic?
     @Published var errorMessage: String?
-
+    
     private let db = Firestore.firestore()
     private var authListener: AuthStateDidChangeListenerHandle?
 
@@ -49,27 +49,28 @@ class AuthManager: ObservableObject {
     // ══════════════════════════════════════════════════════
 
     private func listenForAuthChanges() {
-        authListener = Auth.auth().addStateDidChangeListener {
-            [weak self] _, firebaseUser in
+            authListener = Auth.auth().addStateDidChangeListener {
+                [weak self] _, firebaseUser in
 
-            guard let self = self else { return }
+                guard let self = self else { return }
 
-            if let firebaseUser = firebaseUser {
-                print("User detected: \(firebaseUser.uid)")
-                Task {
-                    await self.loadUserProfile(uid: firebaseUser.uid)
-                }
-            } else {
-                print("No user logged in")
-                DispatchQueue.main.async {
-                    self.currentUser = nil
-                    self.currentClinic = nil
-                    self.isAuthenticated = false
-                    self.isLoading = false
+
+                if let firebaseUser = firebaseUser {
+                    print("User detected: \(firebaseUser.uid)")
+                    Task {
+                        await self.loadUserProfile(uid: firebaseUser.uid)
+                    }
+                } else {
+                    print("No user logged in")
+                    DispatchQueue.main.async {
+                        self.currentUser = nil
+                        self.currentClinic = nil
+                        self.isAuthenticated = false
+                        self.isLoading = false
+                    }
                 }
             }
         }
-    }
 
     // ══════════════════════════════════════════════════════
     // MARK: - Email / Password Sign In
@@ -95,15 +96,18 @@ class AuthManager: ObservableObject {
 
     func signInWithGoogle() async throws {
         // Get the root view controller
-        guard let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
-              let rootVC = windowScene.windows.first?.rootViewController
-        else {
-            throw AuthError.noRootViewController
+        let rootVC: UIViewController = try await MainActor.run {
+                guard let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
+                      let rootVC = windowScene.windows.first?.rootViewController
+                else {
+                    throw AuthError.noRootViewController
+                }
+                return rootVC
         }
 
         // Start Google Sign-In flow
-        let result = try await GIDSignIn.sharedInstance.signIn(
-            withPresenting: rootVC
+        let result: GIDSignInResult = try await GIDSignIn.sharedInstance.signIn(
+               withPresenting: rootVC
         )
 
         // Get tokens
@@ -192,50 +196,8 @@ class AuthManager: ObservableObject {
     }
 
     // ══════════════════════════════════════════════════════
-    // MARK: - Shared Social Sign-In Handler
-    // Checks if user profile exists, creates one if not
-    // ══════════════════════════════════════════════════════
-
-    private func handleSocialSignIn(
-        uid: String,
-        email: String,
-        displayName: String
-    ) async {
-        do {
-            let userDoc = try await db.collection("users")
-                .document(uid)
-                .getDocument()
-
-            if userDoc.exists {
-                // Existing user — update last login
-                try? await db.collection("users")
-                    .document(uid)
-                    .updateData(["lastLogin": Timestamp(date: Date())])
-
-                await loadUserProfile(uid: uid)
-            } else {
-                // New social sign-in — no clinic yet
-                // They need to be added by an admin OR go through registration
-                await MainActor.run {
-                    self.isLoading = false
-                    self.isAuthenticated = false
-                    self.errorMessage = "No account found. Ask your clinic admin to add you, or set up a new clinic."
-                }
-
-                // Sign out since they don't have a profile yet
-                try? Auth.auth().signOut()
-            }
-        } catch {
-            print("Social sign-in profile check error: \(error)")
-            await MainActor.run {
-                self.isLoading = false
-                self.errorMessage = error.localizedDescription
-            }
-        }
-    }
-
-    // ══════════════════════════════════════════════════════
     // MARK: - Load User Profile
+    // Now checks for invitations if profile doesn't exist
     // ══════════════════════════════════════════════════════
 
     private func loadUserProfile(uid: String) async {
@@ -244,43 +206,64 @@ class AuthManager: ObservableObject {
                 .document(uid)
                 .getDocument()
 
-            guard let user = try? userDoc.data(as: AppUser.self) else {
-                print("Could not find user profile")
+            // Profile exists — load it
+            if let user = try? userDoc.data(as: AppUser.self) {
+
+                guard user.isActive else {
+                    print("User is deactivated")
+                    try? Auth.auth().signOut()
+                    await MainActor.run {
+                        self.isAuthenticated = false
+                        self.isLoading = false
+                        self.errorMessage = "Your account has been deactivated."
+                    }
+                    return
+                }
+
+                let clinicDoc = try await db.collection("clinics")
+                    .document(user.clinicID)
+                    .getDocument()
+                let clinic = try? clinicDoc.data(as: Clinic.self)
+
                 await MainActor.run {
-                    self.isAuthenticated = false
+                    self.currentUser = user
+                    self.currentClinic = clinic
+                    self.isAuthenticated = true
                     self.isLoading = false
-                    self.errorMessage = "User profile not found. Contact your admin."
+                    self.errorMessage = nil
+
+                    print("Profile loaded:")
+                    print("   Name: \(user.displayName)")
+                    print("   Role: \(user.role.rawValue)")
+                    print("   Clinic: \(clinic?.name ?? "Unknown")")
                 }
                 return
             }
 
-            guard user.isActive else {
-                print("User is deactivated")
-                try? Auth.auth().signOut()
-                await MainActor.run {
-                    self.isAuthenticated = false
-                    self.isLoading = false
-                    self.errorMessage = "Your account has been deactivated."
-                }
+            // Profile doesn't exist — check for invitation
+            let email = Auth.auth().currentUser?.email ?? ""
+            print("No profile found. Checking invitation for: \(email)")
+
+            let accepted = await UserManager.checkAndAcceptInvitation(
+                uid: uid,
+                email: email,
+                displayName: Auth.auth().currentUser?.displayName ?? "User"
+            )
+
+            if accepted {
+                print("Invitation accepted — loading profile")
+                // Profile was just created from invitation — load it
+                await loadUserProfile(uid: uid)
                 return
             }
 
-            let clinicDoc = try await db.collection("clinics")
-                .document(user.clinicID)
-                .getDocument()
-            let clinic = try? clinicDoc.data(as: Clinic.self)
-
+            // No profile AND no invitation
+            print("No profile or invitation found")
+            try? Auth.auth().signOut()
             await MainActor.run {
-                self.currentUser = user
-                self.currentClinic = clinic
-                self.isAuthenticated = true
+                self.isAuthenticated = false
                 self.isLoading = false
-                self.errorMessage = nil
-
-                print("Profile loaded:")
-                print("   Name: \(user.displayName)")
-                print("   Role: \(user.role.rawValue)")
-                print("   Clinic: \(clinic?.name ?? "Unknown")")
+                self.errorMessage = "No account found. Ask your clinic admin to invite you."
             }
 
         } catch {
@@ -291,8 +274,28 @@ class AuthManager: ObservableObject {
             }
         }
     }
-    
-    // Add this method to AuthManager.swift
+
+    // ══════════════════════════════════════════════════════
+    // MARK: - Shared Social Sign-In Handler
+    // Simplified — just loads profile (which checks invitations)
+    // ══════════════════════════════════════════════════════
+
+    private func handleSocialSignIn(
+        uid: String,
+        email: String,
+        displayName: String
+    ) async {
+        // Update last login if user exists
+        try? await db.collection("users")
+            .document(uid)
+            .updateData(["lastLogin": Timestamp(date: Date())])
+
+        // loadUserProfile handles everything:
+        // - Existing profile → sign in
+        // - No profile but invitation exists → accept invitation → sign in
+        // - No profile and no invitation → reject
+        await loadUserProfile(uid: uid)
+    }
 
     // ══════════════════════════════════════════════════════
     // MARK: - Register New Clinic
