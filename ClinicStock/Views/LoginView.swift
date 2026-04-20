@@ -1,16 +1,8 @@
 //
-//  LoginView 2.swift
-//  ClinicStock
-//
-//  Created by Mohamed Shahbain on 4/14/26.
-//
-
-
-//
 //  LoginView.swift
 //  ClinicStock
 //
-//  Created by Mohamed Shahbain
+//  Created by Mohamed Shahbain on 4/14/26.
 //
 //  UPDATED:
 //  - Dark mode support
@@ -34,6 +26,8 @@ struct LoginView: View {
     @State private var showRegistration = false
     @State private var isSigningIn = false
     @State private var isSocialSigningIn = false
+    @State private var showJoinClinic = false
+
 
     var body: some View {
         NavigationStack {
@@ -210,17 +204,32 @@ struct LoginView: View {
                     Spacer()
                         .frame(height: AppSpacing.huge)
 
-                    // ── Bottom Link ──
-                    VStack(spacing: AppSpacing.xs) {
-                        Text("First time using the app?")
-                            .font(AppFonts.caption)
-                            .foregroundColor(AppColors.textSecondary)
+                    // ── Bottom Links ──
+                    VStack(spacing: AppSpacing.md) {
+                        VStack(spacing: AppSpacing.xs) {
+                            Text("First time using the app?")
+                                .font(AppFonts.caption)
+                                .foregroundColor(AppColors.textSecondary)
 
-                        Button(action: { showRegistration = true }) {
-                            Text("Set up your clinic")
-                                .font(AppFonts.captionSemibold)
-                                .foregroundColor(AppColors.accent)
-                                .underline()
+                            Button(action: { showRegistration = true }) {
+                                Text("Set up your clinic")
+                                    .font(AppFonts.captionSemibold)
+                                    .foregroundColor(AppColors.accent)
+                                    .underline()
+                            }
+                        }
+
+                        VStack(spacing: AppSpacing.xs) {
+                            Text("Been invited to a clinic?")
+                                .font(AppFonts.caption)
+                                .foregroundColor(AppColors.textSecondary)
+
+                            Button(action: { showJoinClinic = true }) {
+                                Text("Join with email")
+                                    .font(AppFonts.captionSemibold)
+                                    .foregroundColor(AppColors.accent)
+                                    .underline()
+                            }
                         }
                     }
                     .padding(.bottom, AppSpacing.xxxl)
@@ -237,6 +246,10 @@ struct LoginView: View {
 //                //RegistrationView()
 //                    //.environmentObject(authManager)
 //            }
+            .sheet(isPresented: $showJoinClinic) {
+                JoinClinicView()
+                    .environmentObject(authManager)
+            }
             .onAppear {
                 loadSavedEmail()
             }
@@ -330,19 +343,6 @@ struct LoginView: View {
 // ══════════════════════════════════════════════════════
 // MARK: - Preview
 // ══════════════════════════════════════════════════════
-
-#Preview("Light") {
-    LoginView()
-        .environmentObject(AuthManager())
-        .preferredColorScheme(.light)
-}
-
-#Preview("Dark") {
-    LoginView()
-        .environmentObject(AuthManager())
-        .preferredColorScheme(.dark)
-}
-
 
 #Preview {
     LoginView()

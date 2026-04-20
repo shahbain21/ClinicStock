@@ -10,6 +10,13 @@
 //  - Remember Me loads saved email
 //  - Shared sign-in completion handler for all providers
 //
+//  FIXES:
+//  - Preview-safe init: pass skipListener: true to avoid Firebase in #Preview
+//  - AuthManager.preview() factory for SwiftUI previews
+//  - Fixed nonce charset typo (missing 'W')
+//  - signOut() now resets isLoading for consistent UI state
+//  - Removed unused parameters from handleSocialSignIn
+//
 
 import Foundation
 import FirebaseAuth
@@ -27,15 +34,27 @@ class AuthManager: ObservableObject {
     @Published var currentUser: AppUser?
     @Published var currentClinic: Clinic?
     @Published var errorMessage: String?
-    
+
     private let db = Firestore.firestore()
     private var authListener: AuthStateDidChangeListenerHandle?
 
     // Apple Sign-In requires a nonce for security
     private var currentNonce: String?
 
-    init() {
-        listenForAuthChanges()
+    // ══════════════════════════════════════════════════════
+    // MARK: - Init
+    //
+    // Pass skipListener: true from SwiftUI #Preview blocks to prevent
+    // AuthManager from touching Firebase (which isn't configured in previews).
+    // ══════════════════════════════════════════════════════
+
+    init(skipListener: Bool = false) {
+        if !skipListener {
+            listenForAuthChanges()
+        } else {
+            // Previews don't have Firebase — don't pretend we're loading.
+            isLoading = false
+        }
     }
 
     deinit {
@@ -49,28 +68,27 @@ class AuthManager: ObservableObject {
     // ══════════════════════════════════════════════════════
 
     private func listenForAuthChanges() {
-            authListener = Auth.auth().addStateDidChangeListener {
-                [weak self] _, firebaseUser in
+        authListener = Auth.auth().addStateDidChangeListener {
+            [weak self] _, firebaseUser in
 
-                guard let self = self else { return }
+            guard let self = self else { return }
 
-
-                if let firebaseUser = firebaseUser {
-                    print("User detected: \(firebaseUser.uid)")
-                    Task {
-                        await self.loadUserProfile(uid: firebaseUser.uid)
-                    }
-                } else {
-                    print("No user logged in")
-                    DispatchQueue.main.async {
-                        self.currentUser = nil
-                        self.currentClinic = nil
-                        self.isAuthenticated = false
-                        self.isLoading = false
-                    }
+            if let firebaseUser = firebaseUser {
+                print("User detected: \(firebaseUser.uid)")
+                Task {
+                    await self.loadUserProfile(uid: firebaseUser.uid)
+                }
+            } else {
+                print("No user logged in")
+                DispatchQueue.main.async {
+                    self.currentUser = nil
+                    self.currentClinic = nil
+                    self.isAuthenticated = false
+                    self.isLoading = false
                 }
             }
         }
+    }
 
     // ══════════════════════════════════════════════════════
     // MARK: - Email / Password Sign In
@@ -97,17 +115,17 @@ class AuthManager: ObservableObject {
     func signInWithGoogle() async throws {
         // Get the root view controller
         let rootVC: UIViewController = try await MainActor.run {
-                guard let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
-                      let rootVC = windowScene.windows.first?.rootViewController
-                else {
-                    throw AuthError.noRootViewController
-                }
-                return rootVC
+            guard let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
+                  let rootVC = windowScene.windows.first?.rootViewController
+            else {
+                throw AuthError.noRootViewController
+            }
+            return rootVC
         }
 
         // Start Google Sign-In flow
         let result: GIDSignInResult = try await GIDSignIn.sharedInstance.signIn(
-               withPresenting: rootVC
+            withPresenting: rootVC
         )
 
         // Get tokens
@@ -126,12 +144,7 @@ class AuthManager: ObservableObject {
         let authResult = try await Auth.auth().signIn(with: credential)
         print("Google sign-in: \(authResult.user.uid)")
 
-        // Handle profile creation/update
-        await handleSocialSignIn(
-            uid: authResult.user.uid,
-            email: authResult.user.email ?? "",
-            displayName: result.user.profile?.name ?? "User"
-        )
+        await handleSocialSignIn(uid: authResult.user.uid)
     }
 
     // ══════════════════════════════════════════════════════
@@ -173,18 +186,7 @@ class AuthManager: ObservableObject {
             let authResult = try await Auth.auth().signIn(with: credential)
             print("Apple sign-in: \(authResult.user.uid)")
 
-            // Build display name from Apple's response
-            let displayName = buildDisplayName(
-                from: appleIDCredential.fullName,
-                fallback: authResult.user.displayName
-            )
-
-            // Handle profile creation/update
-            await handleSocialSignIn(
-                uid: authResult.user.uid,
-                email: appleIDCredential.email ?? authResult.user.email ?? "",
-                displayName: displayName
-            )
+            await handleSocialSignIn(uid: authResult.user.uid)
 
         case .failure(let error):
             // User cancelled — don't show error
@@ -280,12 +282,8 @@ class AuthManager: ObservableObject {
     // Simplified — just loads profile (which checks invitations)
     // ══════════════════════════════════════════════════════
 
-    private func handleSocialSignIn(
-        uid: String,
-        email: String,
-        displayName: String
-    ) async {
-        // Update last login if user exists
+    private func handleSocialSignIn(uid: String) async {
+        // Update last login if user exists (no-op if doc doesn't exist yet)
         try? await db.collection("users")
             .document(uid)
             .updateData(["lastLogin": Timestamp(date: Date())])
@@ -376,6 +374,7 @@ class AuthManager: ObservableObject {
 
         print("Registration complete!")
     }
+
     // ══════════════════════════════════════════════════════
     // MARK: - Sign Out
     // ══════════════════════════════════════════════════════
@@ -387,6 +386,8 @@ class AuthManager: ObservableObject {
             currentUser = nil
             currentClinic = nil
             isAuthenticated = false
+            isLoading = false
+            errorMessage = nil
             print("Signed out")
         } catch {
             print("Error signing out: \(error)")
@@ -430,8 +431,9 @@ class AuthManager: ObservableObject {
         if errorCode != errSecSuccess {
             fatalError("Unable to generate nonce.")
         }
+        // FIXED: Was missing 'W' in the uppercase letters.
         let charset: [Character] = Array(
-            "0123456789ABCDEFGHIJKLMNOPQRSTUVXYZabcdefghijklmnopqrstuvwxyz-._"
+            "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz-._"
         )
         return String(randomBytes.map { charset[Int($0) % charset.count] })
     }
@@ -475,3 +477,30 @@ class AuthManager: ObservableObject {
         }
     }
 }
+
+// ══════════════════════════════════════════════════════
+// MARK: - Preview Support
+//
+// Use AuthManager.preview() in #Preview blocks to get a manager
+// that doesn't touch Firebase. Pass isAuthenticated/currentUser
+// to preview different states.
+// ══════════════════════════════════════════════════════
+
+#if DEBUG
+extension AuthManager {
+    /// Creates an AuthManager safe for SwiftUI previews.
+    /// Does not attach a Firebase auth listener.
+    static func preview(
+        isAuthenticated: Bool = false,
+        currentUser: AppUser? = nil,
+        currentClinic: Clinic? = nil
+    ) -> AuthManager {
+        let manager = AuthManager(skipListener: true)
+        manager.isAuthenticated = isAuthenticated
+        manager.currentUser = currentUser
+        manager.currentClinic = currentClinic
+        manager.isLoading = false
+        return manager
+    }
+}
+#endif

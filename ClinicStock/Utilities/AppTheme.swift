@@ -8,6 +8,7 @@
 //  Every view in the app should reference this file for consistency.
 //  Supports both Light and Dark mode.
 //
+//
 
 import SwiftUI
 
@@ -122,40 +123,58 @@ struct AppRadius {
 
 // ══════════════════════════════════════════════════════
 // MARK: - Shadows
+//
+// FIXED: Previously used @Environment on a static struct, which silently
+// didn't work — shadows were effectively hardcoded to light mode values.
+// Now provided as a ViewModifier that correctly reads colorScheme.
 // ══════════════════════════════════════════════════════
 
-struct AppShadow {
+enum AppShadowSize {
+    case small, medium, large
+}
 
-    @Environment(\.colorScheme) static var colorScheme
+struct AppShadowModifier: ViewModifier {
+    @Environment(\.colorScheme) var colorScheme
+    let size: AppShadowSize
 
-    static var small: Shadow {
-        Shadow(
-            color: .black.opacity(colorScheme == .dark ? 0.3 : 0.05),
-            radius: 4,
-            y: 2
-        )
+    private var opacity: Double {
+        let isDark = colorScheme == .dark
+        switch size {
+        case .small:  return isDark ? 0.30 : 0.05
+        case .medium: return isDark ? 0.40 : 0.08
+        case .large:  return isDark ? 0.50 : 0.12
+        }
     }
 
-    static var medium: Shadow {
-        Shadow(
-            color: .black.opacity(colorScheme == .dark ? 0.4 : 0.08),
-            radius: 8,
-            y: 4
-        )
+    private var radius: CGFloat {
+        switch size {
+        case .small:  return 4
+        case .medium: return 8
+        case .large:  return 16
+        }
     }
 
-    static var large: Shadow {
-        Shadow(
-            color: .black.opacity(colorScheme == .dark ? 0.5 : 0.12),
-            radius: 16,
-            y: 8
-        )
+    private var yOffset: CGFloat {
+        switch size {
+        case .small:  return 2
+        case .medium: return 4
+        case .large:  return 8
+        }
     }
 
-    struct Shadow {
-        let color: Color
-        let radius: CGFloat
-        let y: CGFloat
+    func body(content: Content) -> some View {
+        content.shadow(
+            color: .black.opacity(opacity),
+            radius: radius,
+            y: yOffset
+        )
+    }
+}
+
+extension View {
+    /// Applies a themed shadow that adapts to light/dark mode.
+    func appShadow(_ size: AppShadowSize = .small) -> some View {
+        modifier(AppShadowModifier(size: size))
     }
 }
 
@@ -210,6 +229,7 @@ extension Color {
 
 struct PrimaryButtonStyle: ButtonStyle {
     var isDisabled: Bool = false
+    @Environment(\.colorScheme) var colorScheme
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
@@ -221,7 +241,10 @@ struct PrimaryButtonStyle: ButtonStyle {
                 RoundedRectangle(cornerRadius: AppRadius.medium)
                     .fill(isDisabled ? AppColors.primaryLight.opacity(0.5) : AppColors.primary)
             )
-            .opacity(configuration.isPressed ? 0.85 : 1.0)
+            .brightness(configuration.isPressed
+                ? (colorScheme == .dark ? -0.15 : -0.08)
+                : 0
+            )
             .scaleEffect(configuration.isPressed ? 0.98 : 1.0)
             .animation(.easeInOut(duration: 0.15), value: configuration.isPressed)
     }
@@ -284,6 +307,11 @@ struct PillButtonStyle: ButtonStyle {
 // ══════════════════════════════════════════════════════
 
 // ── Styled Text Field ──
+//
+// FIXED:
+// - Replaced deprecated .autocapitalization(.none) with .textInputAutocapitalization(.never)
+// - Added optional autocorrectionDisabled parameter (defaults true for email/username fields)
+//
 struct AppTextField: View {
     let title: String
     @Binding var text: String
@@ -291,6 +319,8 @@ struct AppTextField: View {
     var isSecure: Bool = false
     var keyboardType: UIKeyboardType = .default
     var icon: String? = nil
+    var autocorrectionDisabled: Bool = true
+    var autocapitalization: TextInputAutocapitalization = .never
 
     var body: some View {
         VStack(alignment: .leading, spacing: AppSpacing.xs) {
@@ -312,7 +342,8 @@ struct AppTextField: View {
                     TextField(placeholder, text: $text)
                         .font(AppFonts.body)
                         .keyboardType(keyboardType)
-                        .autocapitalization(.none)
+                        .textInputAutocapitalization(autocapitalization)
+                        .autocorrectionDisabled(autocorrectionDisabled)
                 }
             }
             .padding(.horizontal, AppSpacing.lg)
@@ -330,6 +361,9 @@ struct AppTextField: View {
 }
 
 // ── Underline Text Field (login screens) ──
+//
+// FIXED: Replaced deprecated .autocapitalization(.none) with modern equivalent.
+//
 struct UnderlineTextField: View {
     let title: String
     var placeholder: String = ""
@@ -353,7 +387,7 @@ struct UnderlineTextField: View {
                     TextField(placeholder, text: $text)
                         .font(AppFonts.body)
                         .keyboardType(keyboardType)
-                        .autocapitalization(.none)
+                        .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
                 }
 
@@ -484,60 +518,90 @@ struct StockBadge: View {
 }
 
 // ── Low Stock Alert Banner ──
+//
+// FIXED: When onTap is nil, render as a non-interactive view instead of
+// wrapping in a Button — avoids phantom press feedback (scale, opacity).
+//
 struct LowStockBanner: View {
     let count: Int
     var onTap: (() -> Void)? = nil
 
     var body: some View {
-        Button(action: { onTap?() }) {
-            HStack(spacing: AppSpacing.md) {
-                Image(systemName: "exclamationmark.triangle.fill")
-                    .font(.system(size: 18))
-                    .foregroundColor(AppColors.danger)
-
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Low Stock Alerts")
-                        .font(AppFonts.captionSemibold)
-                        .foregroundColor(AppColors.danger)
-                    Text("\(count) item\(count == 1 ? "" : "s") below threshold")
-                        .font(AppFonts.footnote)
-                        .foregroundColor(AppColors.textSecondary)
-                }
-
-                Spacer()
-
-                Text("\(count)")
-                    .font(AppFonts.quantitySmall)
-                    .foregroundColor(.white)
-                    .frame(width: 32, height: 32)
-                    .background(Circle().fill(AppColors.danger))
+        if let onTap = onTap {
+            Button(action: onTap) {
+                content
             }
-            .padding(AppSpacing.lg)
-            .background(
-                RoundedRectangle(cornerRadius: AppRadius.medium)
-                    .fill(AppColors.dangerLight)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: AppRadius.medium)
-                            .stroke(AppColors.danger.opacity(0.3), lineWidth: 1)
-                    )
-            )
+            .buttonStyle(.plain)
+        } else {
+            content
         }
-        .buttonStyle(.plain)
+    }
+
+    private var content: some View {
+        HStack(spacing: AppSpacing.md) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.system(size: 18))
+                .foregroundColor(AppColors.danger)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Low Stock Alerts")
+                    .font(AppFonts.captionSemibold)
+                    .foregroundColor(AppColors.danger)
+                Text("\(count) item\(count == 1 ? "" : "s") below threshold")
+                    .font(AppFonts.footnote)
+                    .foregroundColor(AppColors.textSecondary)
+            }
+
+            Spacer()
+
+            Text("\(count)")
+                .font(AppFonts.quantitySmall)
+                .foregroundColor(.white)
+                .frame(width: 32, height: 32)
+                .background(Circle().fill(AppColors.danger))
+        }
+        .padding(AppSpacing.lg)
+        .background(
+            RoundedRectangle(cornerRadius: AppRadius.medium)
+                .fill(AppColors.dangerLight)
+                .overlay(
+                    RoundedRectangle(cornerRadius: AppRadius.medium)
+                        .stroke(AppColors.danger.opacity(0.3), lineWidth: 1)
+                )
+        )
     }
 }
 
 // ── User Avatar ──
+//
+// FIXED: Initials logic now handles:
+// - Hyphenated names ("Jean-Paul Sartre" → "JS" still, but via word boundary)
+// - Single-word names ("Cher" → "CH")
+// - Empty names (→ "?")
+// - Leading/trailing whitespace
+//
 struct UserAvatar: View {
     let name: String
     let role: AppUser.UserRole
     var size: CGFloat = 40
 
     var initials: String {
-        let parts = name.split(separator: " ")
-        if parts.count >= 2 {
-            return String(parts[0].prefix(1) + parts[1].prefix(1)).uppercased()
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return "?" }
+
+        // Split on whitespace, filter out empty components
+        let parts = trimmed
+            .split(whereSeparator: { $0.isWhitespace })
+            .filter { !$0.isEmpty }
+
+        if parts.count >= 2,
+           let first = parts.first?.first,
+           let second = parts.dropFirst().first?.first {
+            return "\(first)\(second)".uppercased()
         }
-        return String(name.prefix(2)).uppercased()
+
+        // Single word — take first two characters
+        return String(trimmed.prefix(2)).uppercased()
     }
 
     var color: Color {
@@ -559,6 +623,9 @@ struct UserAvatar: View {
 }
 
 // ── Search Bar ──
+//
+// FIXED: Replaced deprecated .autocapitalization(.none) with modern equivalent.
+//
 struct AppSearchBar: View {
     @Binding var text: String
     var placeholder: String = "Search..."
@@ -570,7 +637,8 @@ struct AppSearchBar: View {
 
             TextField(placeholder, text: $text)
                 .font(AppFonts.body)
-                .autocapitalization(.none)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
 
             if !text.isEmpty {
                 Button(action: { text = "" }) {
@@ -758,6 +826,11 @@ extension View {
                 RoleBadge(role: .editor)
                 RoleBadge(role: .staff)
             }
+            HStack {
+                UserAvatar(name: "Mohamed Shahbain", role: .admin)
+                UserAvatar(name: "Cher", role: .staff)
+                UserAvatar(name: "", role: .staff)
+            }
         }
         .padding()
     }
@@ -777,6 +850,11 @@ extension View {
                 RoleBadge(role: .manager)
                 RoleBadge(role: .editor)
                 RoleBadge(role: .staff)
+            }
+            HStack {
+                UserAvatar(name: "Mohamed Shahbain", role: .admin)
+                UserAvatar(name: "Cher", role: .staff)
+                UserAvatar(name: "", role: .staff)
             }
         }
         .padding()

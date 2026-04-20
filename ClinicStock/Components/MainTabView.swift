@@ -2,17 +2,12 @@
 //  MainTabView.swift
 //  ClinicStock
 //
-//  Created by Mohamed Shahbain on 4/14/26.
-//
-
-//
-//  MainTabView.swift
-//  ClinicStock
-//
 //  Created by Mohamed Shahbain
 //
-//  Main tab navigation after login.
-//  Tabs shown depend on user role.
+//  UPDATED:
+//  - Calls startListening on appear
+//  - Stops listening on disappear
+//  - Fixed AppShadow usage
 //
 
 import SwiftUI
@@ -35,7 +30,7 @@ struct MainTabView: View {
                     .tag(0)
 
                 // Tab 2: Inventory
-                InventoryPlaceholder()
+                InventoryListView()
                     .tag(1)
 
                 // Tab 3: Scanner
@@ -55,11 +50,30 @@ struct MainTabView: View {
             CustomTabBar(selectedTab: $selectedTab)
         }
         .ignoresSafeArea(.keyboard)
+        .onAppear {
+            startListeningIfNeeded()
+        }
+        .onChange(of: authManager.currentUser?.clinicID) { _, newClinicID in
+            // If user switches clinic, restart listener
+            if let clinicID = newClinicID, !clinicID.isEmpty {
+                inventoryManager.startListening(clinicID: clinicID)
+            }
+        }
+    }
+
+    private func startListeningIfNeeded() {
+        guard let clinicID = authManager.currentUser?.clinicID,
+              !clinicID.isEmpty else {
+            print("⚠️ No clinicID — cannot start inventory listener")
+            return
+        }
+        print("✅ Starting inventory listener for clinic: \(clinicID)")
+        inventoryManager.startListening(clinicID: clinicID)
     }
 }
 
 // ══════════════════════════════════════════════════════
-// MARK: - Custom Tab Bar (matches prototype)
+// MARK: - Custom Tab Bar
 // ══════════════════════════════════════════════════════
 
 struct CustomTabBar: View {
@@ -80,11 +94,7 @@ struct CustomTabBar: View {
         .padding(.bottom, AppSpacing.xxl)
         .background(
             AppColors.tabBarBackground
-                .shadow(
-                    color: AppShadow.large.color,
-                    radius: AppShadow.large.radius,
-                    y: -AppShadow.large.y
-                )
+                .shadow(color: .black.opacity(0.3), radius: 16, y: -8)
                 .ignoresSafeArea(edges: .bottom)
         )
     }
@@ -110,8 +120,7 @@ struct CustomTabBar: View {
 }
 
 // ══════════════════════════════════════════════════════
-// MARK: - Placeholder Views
-// Will be replaced with real views as we build them
+// MARK: - Placeholder Views (keep until replaced)
 // ══════════════════════════════════════════════════════
 
 struct DashboardPlaceholder: View {
@@ -193,40 +202,11 @@ struct DashboardPlaceholder: View {
                     }
                 }
                 .padding(.top, AppSpacing.lg)
+                .padding(.bottom, 100)
             }
             .appBackground()
             .navigationTitle("Dashboard")
             .navigationBarTitleDisplayMode(.inline)
-        }
-    }
-}
-
-struct InventoryPlaceholder: View {
-    @EnvironmentObject var inventoryManager: InventoryManager
-
-    var body: some View {
-        NavigationStack {
-            ScrollView {
-                LazyVStack(spacing: AppSpacing.sm) {
-                    ForEach(inventoryManager.items) { item in
-                        InventoryRowView(item: item)
-                    }
-                }
-                .padding(.horizontal, AppSpacing.lg)
-                .padding(.top, AppSpacing.md)
-            }
-            .appBackground()
-            .navigationTitle("Inventory")
-            .navigationBarTitleDisplayMode(.inline)
-            .overlay {
-                if inventoryManager.items.isEmpty {
-                    EmptyStateView(
-                        icon: "shippingbox",
-                        title: "No Items",
-                        message: "Start by adding inventory items"
-                    )
-                }
-            }
         }
     }
 }
@@ -338,7 +318,8 @@ struct SettingsPlaceholder: View {
                         }
 
                         NavigationLink {
-                            ContentView()  // Database seeder tool
+                            ContentView()
+                                .environmentObject(authManager)
                         } label: {
                             Label("Database Tools", systemImage: "wrench.and.screwdriver.fill")
                         }

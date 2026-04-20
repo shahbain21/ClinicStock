@@ -8,7 +8,7 @@
 import Foundation
 import FirebaseFirestore
 
-struct InventoryItem: Codable, Identifiable{
+struct InventoryItem: Codable, Identifiable, Hashable{
     @DocumentID var id: String?
     var name: String
     var hcpcsCode: String

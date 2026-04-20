@@ -149,7 +149,7 @@ class UserManager: ObservableObject {
             "previousValue": "",
             "newValue": role.rawValue,
             "timestamp": Timestamp(date: Date())
-        ])
+        ], clinicID: clinicID)
 
         await MainActor.run {
             self.successMessage = "Invitation sent! Tell \(firstName) to download the app and sign in with \(normalizedEmail)."
@@ -274,7 +274,7 @@ class UserManager: ObservableObject {
             "previousValue": "",
             "newValue": newRole.rawValue,
             "timestamp": Timestamp(date: Date())
-        ])
+        ], clinicID: clinicID)
 
         await loadUsers(clinicID: clinicID)
     }
@@ -311,7 +311,7 @@ class UserManager: ObservableObject {
             "previousValue": "active",
             "newValue": "inactive",
             "timestamp": Timestamp(date: Date())
-        ])
+        ], clinicID: clinicID)
 
         await loadUsers(clinicID: clinicID)
     }

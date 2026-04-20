@@ -6,9 +6,21 @@
 //
 //  Refactored to use subcollections:
 //  inventory/{clinicID}/items/{itemID}
+//  historyLogs/{clinicID}/entries/{logID}
 //
 //  clinicID is kept on each document AND in the path.
 //  Redundant by design — easier debugging, no future bugs.
+//
+//  FIXES:
+//  - Listener callbacks now surface errors so the UI can distinguish
+//    "connection lost" from "empty inventory" — critical for medical apps.
+//  - addLog() now takes clinicID as a first-class parameter and writes
+//    to a clinic-scoped subcollection (historyLogs/{clinicID}/entries).
+//    Callers no longer need to remember to put clinicID in the dict.
+//  - getLowStockItems flagged with TODO for eventual server-side filtering.
+//  - getClinic now defaults to active-only, with includeInactive: option
+//    for admin tools that need to see deactivated clinics.
+//  - Minor cleanups (redundant `let _`).
 //
 
 import Foundation
@@ -39,9 +51,13 @@ class DatabaseService {
     }
 
     // ── Listen to inventory in real time ──
+    //
+    // The completion handler receives ([InventoryItem], Error?) so callers
+    // can distinguish "query succeeded, no items" from "listener failed".
+    //
     func listenToInventory(
         clinicID: String,
-        completion: @escaping ([InventoryItem]) -> Void
+        completion: @escaping ([InventoryItem], Error?) -> Void
     ) -> ListenerRegistration {
 
         return itemsCollection(clinicID: clinicID)
@@ -49,12 +65,12 @@ class DatabaseService {
             .addSnapshotListener { snapshot, error in
                 if let error = error {
                     print("Inventory listener error: \(error)")
-                    completion([])
+                    completion([], error)
                     return
                 }
 
                 guard let documents = snapshot?.documents else {
-                    completion([])
+                    completion([], nil)
                     return
                 }
 
@@ -63,7 +79,7 @@ class DatabaseService {
                 }
 
                 print("Loaded \(items.count) inventory items for clinic \(clinicID)")
-                completion(items)
+                completion(items, nil)
             }
     }
 
@@ -123,6 +139,12 @@ class DatabaseService {
     }
 
     // ── Get low stock items for a clinic ──
+    //
+    // TODO: Client-side filtering — fine for ~100 items per clinic, but at
+    // scale we should denormalize an `isLowStock: Bool` field updated on
+    // every quantity change so we can query `.whereField("isLowStock", ...)`.
+    // Firestore can't compare two fields against each other in a query.
+    //
     func getLowStockItems(clinicID: String) async throws -> [InventoryItem] {
         let snapshot = try await itemsCollection(clinicID: clinicID)
             .getDocuments()
@@ -146,7 +168,14 @@ class DatabaseService {
         return try? doc.data(as: HCPCSCatalogItem.self)
     }
 
-    // ── Search catalog by common name ──
+    // ── Search catalog by common name (exact match against commonNames array) ──
+    //
+    // Note: This is an EXACT match via arrayContains — "knee brace" in the
+    // array won't match a search for "knee". HCPCSSearchService does smarter
+    // substring matching client-side after loading the full catalog via
+    // getAllCatalogItems(). This method is kept for future admin tooling
+    // (e.g. "find items tagged exactly 'tens unit'").
+    //
     func searchCatalog(query: String) async throws -> [HCPCSCatalogItem] {
         let snapshot = try await db.collection("hcpcsCatalog")
             .whereField("commonNames", arrayContains: query.lowercased())
@@ -180,10 +209,11 @@ class DatabaseService {
 
         return try? snapshot.documents.first?.data(as: HCPCSCatalogItem.self)
     }
-    
+
     // ── Get ALL catalog items (used by HCPCSSearchService for local cache) ──
     func getAllCatalogItems() async throws -> [HCPCSCatalogItem] {
         let snapshot = try await db.collection("hcpcsCatalog")
+            .order(by: "hcpcsCode")
             .getDocuments()
         return snapshot.documents.compactMap {
             try? $0.data(as: HCPCSCatalogItem.self)
@@ -215,17 +245,37 @@ class DatabaseService {
 
     // ══════════════════════════════════════════════════════
     // MARK: - HISTORY LOGS
+    // Path: historyLogs/{clinicID}/entries/{logID}
+    //
+    // Subcollection by clinic — avoids a whereField filter on every read
+    // and makes clinicID mandatory at the API level instead of hoping the
+    // caller remembered to put it in the dict.
     // ══════════════════════════════════════════════════════
 
-    func addLog(_ log: [String: Any]) async throws {
-        let _ = try await db.collection("historyLogs")
-            .addDocument(data: log)
-        print("Log added")
+    // Convenience — returns the entries subcollection for a clinic
+    private func logsCollection(clinicID: String) -> CollectionReference {
+        return db.collection("historyLogs")
+            .document(clinicID)
+            .collection("entries")
     }
 
+    // ── Add a log entry ──
+    //
+    // clinicID is a required parameter. It's also merged into the document
+    // data for redundancy (same pattern as inventory items).
+    //
+    func addLog(_ log: [String: Any], clinicID: String) async throws {
+        var logData = log
+        logData["clinicID"] = clinicID
+
+        _ = try await logsCollection(clinicID: clinicID)
+            .addDocument(data: logData)
+        print("Log added to clinic \(clinicID)")
+    }
+
+    // ── Get recent logs for a clinic ──
     func getClinicLogs(clinicID: String, limit: Int = 50) async throws -> [HistoryLog] {
-        let snapshot = try await db.collection("historyLogs")
-            .whereField("clinicID", isEqualTo: clinicID)
+        let snapshot = try await logsCollection(clinicID: clinicID)
             .order(by: "timestamp", descending: true)
             .limit(to: limit)
             .getDocuments()
@@ -235,8 +285,9 @@ class DatabaseService {
         }
     }
 
-    func getItemLogs(itemID: String, limit: Int = 20) async throws -> [HistoryLog] {
-        let snapshot = try await db.collection("historyLogs")
+    // ── Get logs for a specific item ──
+    func getItemLogs(itemID: String, clinicID: String, limit: Int = 20) async throws -> [HistoryLog] {
+        let snapshot = try await logsCollection(clinicID: clinicID)
             .whereField("itemID", isEqualTo: itemID)
             .order(by: "timestamp", descending: true)
             .limit(to: limit)
@@ -247,25 +298,36 @@ class DatabaseService {
         }
     }
 
+    // ── Listen to recent logs in real time ──
+    //
+    // As with listenToInventory, the completion handler receives ([HistoryLog], Error?)
+    // so callers can distinguish success-empty from failure.
+    //
     func listenToRecentLogs(
         clinicID: String,
         limit: Int = 20,
-        completion: @escaping ([HistoryLog]) -> Void
+        completion: @escaping ([HistoryLog], Error?) -> Void
     ) -> ListenerRegistration {
 
-        return db.collection("historyLogs")
-            .whereField("clinicID", isEqualTo: clinicID)
+        return logsCollection(clinicID: clinicID)
             .order(by: "timestamp", descending: true)
             .limit(to: limit)
             .addSnapshotListener { snapshot, error in
-                guard let documents = snapshot?.documents else {
-                    completion([])
+                if let error = error {
+                    print("Logs listener error: \(error)")
+                    completion([], error)
                     return
                 }
+
+                guard let documents = snapshot?.documents else {
+                    completion([], nil)
+                    return
+                }
+
                 let logs = documents.compactMap {
                     try? $0.data(as: HistoryLog.self)
                 }
-                completion(logs)
+                completion(logs, nil)
             }
     }
 
@@ -320,11 +382,26 @@ class DatabaseService {
         }
     }
 
-    func getClinic(clinicID: String) async throws -> Clinic? {
+    // ── Get a specific clinic ──
+    //
+    // Defaults to active-only for consistency with getAllClinics().
+    // Pass includeInactive: true from admin tools that need to see or
+    // reactivate deactivated clinics.
+    //
+    func getClinic(
+        clinicID: String,
+        includeInactive: Bool = false
+    ) async throws -> Clinic? {
         let doc = try await db.collection("clinics")
             .document(clinicID)
             .getDocument()
-        return try? doc.data(as: Clinic.self)
+
+        guard let clinic = try? doc.data(as: Clinic.self) else { return nil }
+
+        if !includeInactive && !clinic.isActive {
+            return nil
+        }
+        return clinic
     }
 
     // ══════════════════════════════════════════════════════
