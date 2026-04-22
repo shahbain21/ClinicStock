@@ -4,19 +4,25 @@
 //
 //  Created by Mohamed Shahbain on 4/18/26.
 //
-//  FIXES:
-//  - NavigationLink destination wired to real ItemDetailView.
-//  - "Add An Item" sheet wired to real AddItemView.
-//  - Dead showScanner state removed (scanner belongs with CatalogSearchView
-//    and will be shared once extracted; scan buttons here were dead UI).
-//  - Listener error banner at top of list so connection loss is visible
-//    instead of masquerading as empty inventory.
-//  - .safeAreaInset(edge: .bottom) replaces the magic 120pt bottom
-//    padding. Bottom bar stacks correctly over the tab bar automatically.
-//  - Sort menu shows checkmark on the active sort.
-//  - Search trims whitespace before matching.
-//  - Preview uses AuthManager.preview() + full environment.
-//  - Duplicate header comments cleaned up.
+//  LAYOUT FIXES:
+//  - Search + filter pills grouped in a visually cohesive sticky header
+//    with its own background matching the nav area, plus a subtle
+//    divider at the bottom to separate from the scrolling list.
+//  - List content now scrolls cleanly beneath the header — no more weird
+//    "top of item card peeking" behind the filters.
+//  - "Add An Item" bottom bar has a proper background + top shadow so
+//    it doesn't look like it's floating on top of a list row.
+//  - Increased padding between header, list, and bottom button so nothing
+//    feels cramped.
+//
+//  PRIOR FIXES (carried forward):
+//  - NavigationLink wired to real ItemDetailView.
+//  - AddItemView sheet.
+//  - Dead showScanner state removed.
+//  - listenerError banner.
+//  - .safeAreaInset for bottom bar.
+//  - Sort menu checkmark on active sort.
+//  - Search trims whitespace.
 //
 
 import SwiftUI
@@ -48,7 +54,6 @@ struct InventoryListView: View {
     var filteredItems: [InventoryItem] {
         var items = inventoryManager.items
 
-        // Filter
         switch selectedFilter {
         case .all:
             break
@@ -58,7 +63,6 @@ struct InventoryListView: View {
             items = items.filter { $0.quantity <= 0 }
         }
 
-        // Search — trim so whitespace-only queries don't distort results
         let trimmed = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
         if !trimmed.isEmpty {
             let query = trimmed.lowercased()
@@ -71,7 +75,6 @@ struct InventoryListView: View {
             }
         }
 
-        // Sort
         switch sortOrder {
         case .nameAsc:
             items.sort { $0.name < $1.name }
@@ -106,8 +109,11 @@ struct InventoryListView: View {
         NavigationStack {
             VStack(spacing: 0) {
                 connectionBanner
-                searchBar
-                filterBar
+
+                // Sticky header: search + filters as one grouped unit
+                headerBlock
+
+                // Scrolling list — cleanly below the header, no bleed-through
                 listContent
             }
             .appBackground()
@@ -135,7 +141,31 @@ struct InventoryListView: View {
     }
 
     // ══════════════════════════════════════════════════════
-    // MARK: - Subviews
+    // MARK: - Header Block (search + filters together)
+    // ══════════════════════════════════════════════════════
+
+    private var headerBlock: some View {
+        VStack(spacing: AppSpacing.md) {
+            searchBar
+            filterBar
+        }
+        .padding(.horizontal, AppSpacing.lg)
+        .padding(.top, AppSpacing.md)
+        .padding(.bottom, AppSpacing.lg)
+        .background(
+            AppColors.background
+                // Subtle divider at the bottom to separate from list
+                .overlay(
+                    Rectangle()
+                        .fill(AppColors.border.opacity(0.3))
+                        .frame(height: 1),
+                    alignment: .bottom
+                )
+        )
+    }
+
+    // ══════════════════════════════════════════════════════
+    // MARK: - Connection Banner
     // ══════════════════════════════════════════════════════
 
     @ViewBuilder
@@ -171,10 +201,12 @@ struct InventoryListView: View {
         }
     }
 
+    // ══════════════════════════════════════════════════════
+    // MARK: - Search + Filter
+    // ══════════════════════════════════════════════════════
+
     private var searchBar: some View {
         AppSearchBar(text: $searchText, placeholder: "Search")
-            .padding(.horizontal, AppSpacing.lg)
-            .padding(.top, AppSpacing.md)
     }
 
     private var filterBar: some View {
@@ -195,8 +227,6 @@ struct InventoryListView: View {
 
             Spacer()
         }
-        .padding(.horizontal, AppSpacing.lg)
-        .padding(.top, AppSpacing.md)
     }
 
     private var sortMenu: some View {
@@ -235,6 +265,10 @@ struct InventoryListView: View {
         }
     }
 
+    // ══════════════════════════════════════════════════════
+    // MARK: - List Content
+    // ══════════════════════════════════════════════════════
+
     @ViewBuilder
     private var listContent: some View {
         if inventoryManager.isLoading && inventoryManager.items.isEmpty {
@@ -266,28 +300,45 @@ struct InventoryListView: View {
                 }
                 .padding(.horizontal, AppSpacing.lg)
                 .padding(.top, AppSpacing.md)
+                .padding(.bottom, AppSpacing.md)
             }
+            .scrollContentBackground(.hidden)
         }
     }
 
+    // ══════════════════════════════════════════════════════
+    // MARK: - Bottom Action Bar
+    // ══════════════════════════════════════════════════════
+
     private var bottomBar: some View {
-        Button(action: { showAddItem = true }) {
-            HStack(spacing: AppSpacing.sm) {
-                Image(systemName: "plus.circle.fill")
-                Text("Add An Item")
+        VStack(spacing: 0) {
+            // Top divider — separates the button from scrolling content
+            Rectangle()
+                .fill(AppColors.border.opacity(0.3))
+                .frame(height: 1)
+
+            Button(action: { showAddItem = true }) {
+                HStack(spacing: AppSpacing.sm) {
+                    Image(systemName: "plus.circle.fill")
+                    Text("Add An Item")
+                }
+                .font(AppFonts.bodySemibold)
+                .foregroundColor(.white)
+                .frame(maxWidth: .infinity)
+                .frame(height: 48)
+                .background(
+                    RoundedRectangle(cornerRadius: AppRadius.medium)
+                        .fill(AppColors.accent)
+                )
             }
-            .font(AppFonts.bodySemibold)
-            .foregroundColor(.white)
-            .frame(maxWidth: .infinity)
-            .frame(height: 48)
-            .background(
-                RoundedRectangle(cornerRadius: AppRadius.medium)
-                    .fill(AppColors.accent)
-            )
+            .padding(.horizontal, AppSpacing.lg)
+            .padding(.vertical, AppSpacing.md)
         }
-        .padding(.horizontal, AppSpacing.lg)
-        .padding(.vertical, AppSpacing.md)
-        .background(AppColors.background)
+        .background(
+            AppColors.background
+                // Soft shadow at the top to separate from list content
+                .shadow(color: .black.opacity(0.15), radius: 8, y: -2)
+        )
     }
 
     // ══════════════════════════════════════════════════════

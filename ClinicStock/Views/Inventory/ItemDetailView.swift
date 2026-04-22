@@ -4,12 +4,18 @@
 //
 //  Created by Mohamed Shahbain
 //
-//  Item detail screen. Every role can check out. Editors and above can
-//  add stock, edit, and remove. Anyone who made a recent checkout can
-//  void it within 5 minutes.
-//
-//  The view watches inventoryManager.items for the current item by ID,
-//  so real-time updates from the Firestore listener flow through.
+//  HIFI RESTRUCTURE:
+//  - Product image placeholder at the top (SF Symbol for now; real image
+//    upload is a future feature).
+//  - Item name + LOT / HCPCS secondary row below image.
+//  - Info cards restructured to match the hifi's card-per-field style:
+//      Quantity card     (with "X items remaining until low stock"
+//                         messaging instead of the generic 3-column)
+//      Supplier card     (displays `manufacturer` labeled as "Supplier")
+//      Last Restocked    (pulls from lastUpdated + lastUpdatedBy user)
+//      Description card  (displays item.notes, prominent if non-empty)
+//  - Actions retained: Check Out / Add Stock / Void / Edit / Remove.
+//  - Void banner, stock warning banner, recent history section kept.
 //
 
 import SwiftUI
@@ -29,12 +35,12 @@ struct ItemDetailView: View {
     @State private var recentLogs: [HistoryLog] = []
     @State private var isLoadingLogs = false
     @State private var errorMessage: String?
+    @State private var lastRestockedByName: String?
 
     // 5 minute void window, matching PermissionManager's hardcoded value.
     private static let voidWindow: TimeInterval = 5 * 60
 
-    // Live reference — when the Firestore listener updates this item,
-    // the view reflects it via @Published inventoryManager.items.
+    // Live reference — updates flow through @Published inventoryManager.items.
     private var currentItem: InventoryItem {
         inventoryManager.items.first(where: { $0.id == item.id }) ?? item
     }
@@ -63,8 +69,6 @@ struct ItemDetailView: View {
         PermissionManager.canRemoveStock(role: role)
     }
 
-    // A recent checkout log by the current user, within the void window,
-    // for this item.
     private var voidableRecentLog: HistoryLog? {
         guard let uid = authManager.currentUser?.id else { return nil }
         let cutoff = Date().addingTimeInterval(-Self.voidWindow)
@@ -74,8 +78,17 @@ struct ItemDetailView: View {
             log.userID == uid &&
             log.action == .quantityUpdate &&
             log.timestamp >= cutoff &&
-            // Only checkouts — where quantity went down
             (Int(log.newValue) ?? 0) < (Int(log.previousValue) ?? 0)
+        }
+    }
+
+    // Last restock log — for the "Last Restocked" card.
+    private var lastRestockLog: HistoryLog? {
+        recentLogs.first { log in
+            log.itemID == currentItem.id &&
+            (log.action == .added ||
+             (log.action == .quantityUpdate &&
+              (Int(log.newValue) ?? 0) > (Int(log.previousValue) ?? 0)))
         }
     }
 
@@ -85,8 +98,9 @@ struct ItemDetailView: View {
 
     var body: some View {
         ScrollView {
-            VStack(spacing: AppSpacing.xl) {
-                headerCard
+            VStack(spacing: AppSpacing.lg) {
+                productImageBlock
+                nameBlock
 
                 if currentItem.isLowStock || currentItem.isOutOfStock {
                     stockBanner
@@ -102,15 +116,22 @@ struct ItemDetailView: View {
                     voidBanner(log: voidable)
                 }
 
-                detailsCard
+                quantityCard
+                supplierCard
+                lastRestockedCard
 
+                if !currentItem.notes.isEmpty {
+                    descriptionCard
+                }
+
+                otherDetailsCard
                 historySection
             }
             .padding(.horizontal, AppSpacing.lg)
             .padding(.vertical, AppSpacing.lg)
         }
         .appBackground()
-        .navigationTitle(currentItem.name)
+        .navigationTitle("Inventory Details")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             if canEdit || canRemove {
@@ -182,47 +203,54 @@ struct ItemDetailView: View {
     // MARK: - Sections
     // ══════════════════════════════════════════════════════
 
-    private var headerCard: some View {
-        VStack(spacing: AppSpacing.md) {
+    private var productImageBlock: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: AppRadius.medium)
+                .fill(AppColors.cardBackground.opacity(0.5))
+                .frame(height: 180)
+
+            // Placeholder icon — real image upload is a future feature.
+            // Using an SF Symbol that hints at the category when possible,
+            // falling back to a generic "shippingbox" for unknown types.
+            Image(systemName: categoryIconName)
+                .font(.system(size: 60))
+                .foregroundColor(AppColors.textTertiary)
+        }
+    }
+
+    // Best-effort mapping of common category names to SF Symbols.
+    // Staff sees something more relevant than a plain box.
+    private var categoryIconName: String {
+        let cat = currentItem.category.lowercased()
+        if cat.contains("orthopedic") || cat.contains("brace") { return "figure.walk" }
+        if cat.contains("cervical") || cat.contains("neck") { return "person.bust" }
+        if cat.contains("lumbar") || cat.contains("back") { return "figure.core.training" }
+        if cat.contains("wound") { return "bandage" }
+        if cat.contains("respiratory") { return "lungs" }
+        if cat.contains("diabetic") { return "drop" }
+        if cat.contains("compression") { return "figure.run" }
+        if cat.contains("mobility") { return "figure.roll" }
+        if cat.contains("electrical") || cat.contains("stim") { return "bolt" }
+        return "shippingbox"
+    }
+
+    private var nameBlock: some View {
+        VStack(alignment: .leading, spacing: AppSpacing.xs) {
             Text(currentItem.name)
                 .font(AppFonts.title2)
                 .foregroundColor(AppColors.textPrimary)
-                .multilineTextAlignment(.center)
 
-            HStack(spacing: AppSpacing.sm) {
-                badge(text: currentItem.hcpcsCode, color: AppColors.accent)
-                badge(text: currentItem.category, color: AppColors.textSecondary)
-                if !currentItem.size.isEmpty && currentItem.size != "N/A" {
-                    badge(text: currentItem.size, color: AppColors.textSecondary)
+            // "LOT #: 19140  HCPCS #: L9534" style row
+            HStack(spacing: AppSpacing.md) {
+                if !currentItem.lotNumber.isEmpty {
+                    Text("LOT #: \(currentItem.lotNumber)")
                 }
+                Text("HCPCS #: \(currentItem.hcpcsCode)")
             }
-
-            HStack(spacing: AppSpacing.xxl) {
-                quantityDisplay(
-                    value: "\(currentItem.quantity)",
-                    label: "On hand",
-                    color: quantityColor
-                )
-                quantityDisplay(
-                    value: "\(currentItem.quantityUsed)",
-                    label: "Used",
-                    color: AppColors.textSecondary
-                )
-                quantityDisplay(
-                    value: "\(currentItem.lowStockThreshold)",
-                    label: "Low at",
-                    color: AppColors.textSecondary
-                )
-            }
-            .padding(.top, AppSpacing.md)
+            .font(AppFonts.caption)
+            .foregroundColor(AppColors.textSecondary)
         }
-        .padding(AppSpacing.xl)
-        .frame(maxWidth: .infinity)
-        .background(
-            RoundedRectangle(cornerRadius: AppRadius.medium)
-                .fill(AppColors.cardBackground)
-        )
-        .cardShadow()
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private var stockBanner: some View {
@@ -319,40 +347,188 @@ struct ItemDetailView: View {
         )
     }
 
-    private var detailsCard: some View {
-        VStack(spacing: 0) {
-            sectionTitle("Details")
+    // ══════════════════════════════════════════════════════
+    // MARK: - Info Cards (hifi layout)
+    // ══════════════════════════════════════════════════════
 
-            detailRow("HCPCS Code", currentItem.hcpcsCode)
-            detailRow("Category", currentItem.category)
-            if !currentItem.size.isEmpty {
-                detailRow("Size", currentItem.size)
+    /// Big quantity display with contextual "X items remaining until low stock"
+    /// messaging on the left.
+    private var quantityCard: some View {
+        HStack(alignment: .center, spacing: AppSpacing.lg) {
+            VStack(alignment: .leading, spacing: AppSpacing.xs) {
+                Text("Quantity:")
+                    .font(AppFonts.bodySemibold)
+                    .foregroundColor(AppColors.textPrimary)
+
+                Text(quantityMessage)
+                    .font(AppFonts.footnote)
+                    .foregroundColor(AppColors.textSecondary)
             }
-            if !currentItem.lotNumber.isEmpty {
-                detailRow("Lot Number", currentItem.lotNumber)
+
+            Spacer()
+
+            VStack(alignment: .trailing, spacing: 0) {
+                Text("\(currentItem.quantity)")
+                    .font(.system(size: 36, weight: .bold))
+                    .foregroundColor(quantityColor)
+                Text("Items")
+                    .font(AppFonts.footnote)
+                    .foregroundColor(AppColors.textTertiary)
             }
-            if !currentItem.barcode.isEmpty {
-                detailRow("Barcode", currentItem.barcode)
-            }
-            if !currentItem.manufacturer.isEmpty {
-                detailRow("Manufacturer", currentItem.manufacturer)
-            }
-            if let cost = currentItem.unitCost, cost > 0 {
-                detailRow("Unit Cost", String(format: "$%.2f", cost))
-                detailRow("Total Value", String(format: "$%.2f", currentItem.totalValue))
-            }
-            if !currentItem.notes.isEmpty {
-                detailRow("Notes", currentItem.notes)
-            }
-            detailRow("Added", currentItem.dateAdded.formatted(date: .abbreviated, time: .shortened))
-            detailRow("Last Updated", currentItem.lastUpdated.formatted(date: .abbreviated, time: .shortened))
         }
         .padding(AppSpacing.lg)
+        .frame(maxWidth: .infinity)
         .background(
             RoundedRectangle(cornerRadius: AppRadius.medium)
                 .fill(AppColors.cardBackground)
         )
         .cardShadow()
+    }
+
+    private var quantityMessage: String {
+        if currentItem.isOutOfStock {
+            return "Out of stock"
+        }
+        if currentItem.isLowStock {
+            return "Below low stock threshold (\(currentItem.lowStockThreshold))"
+        }
+        let remaining = currentItem.quantity - currentItem.lowStockThreshold
+        if remaining <= 0 {
+            return "At low stock threshold"
+        }
+        return "\(remaining) items remaining until low stock"
+    }
+
+    /// Manufacturer displayed as "Supplier" per hifi naming.
+    private var supplierCard: some View {
+        HStack {
+            Text("Supplier:")
+                .font(AppFonts.bodySemibold)
+                .foregroundColor(AppColors.textPrimary)
+            Text(currentItem.manufacturer.isEmpty ? "—" : currentItem.manufacturer)
+                .font(AppFonts.body)
+                .foregroundColor(AppColors.textSecondary)
+            Spacer()
+        }
+        .padding(AppSpacing.lg)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: AppRadius.medium)
+                .fill(AppColors.cardBackground)
+        )
+        .cardShadow()
+    }
+
+    /// Shows the most recent "added" or "stock increase" log entry.
+    /// Falls back to the item's lastUpdated if no restock log is in the
+    /// loaded window.
+    private var lastRestockedCard: some View {
+        VStack(alignment: .leading, spacing: AppSpacing.xs) {
+            Text("Last Restocked:")
+                .font(AppFonts.bodySemibold)
+                .foregroundColor(AppColors.textPrimary)
+
+            Text(lastRestockedMessage)
+                .font(AppFonts.caption)
+                .foregroundColor(AppColors.textSecondary)
+        }
+        .padding(AppSpacing.lg)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: AppRadius.medium)
+                .fill(AppColors.cardBackground)
+        )
+        .cardShadow()
+    }
+
+    private var lastRestockedMessage: String {
+        if let log = lastRestockLog {
+            let dateStr = log.timestamp.formatted(
+                .dateTime
+                    .month(.abbreviated)
+                    .day()
+                    .year()
+                    .hour()
+                    .minute()
+            )
+            return "\(dateStr) by \(log.userName)"
+        }
+        // Fallback: item-level lastUpdated. Less specific (could be any
+        // edit, not just a restock) but better than nothing.
+        let dateStr = currentItem.lastUpdated.formatted(
+            .dateTime
+                .month(.abbreviated)
+                .day()
+                .year()
+                .hour()
+                .minute()
+        )
+        if let name = lastRestockedByName {
+            return "\(dateStr) by \(name)"
+        }
+        return dateStr
+    }
+
+    /// Item description card — displays item.notes as a prominent
+    /// prose paragraph when present.
+    private var descriptionCard: some View {
+        VStack(alignment: .leading, spacing: AppSpacing.sm) {
+            Text("Item Description:")
+                .font(AppFonts.bodySemibold)
+                .foregroundColor(AppColors.textPrimary)
+
+            Text(currentItem.notes)
+                .font(AppFonts.caption)
+                .foregroundColor(AppColors.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(AppSpacing.lg)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: AppRadius.medium)
+                .fill(AppColors.cardBackground)
+        )
+        .cardShadow()
+    }
+
+    /// Secondary details not covered by the hifi's dedicated cards.
+    /// Kept so nothing on the model becomes invisible.
+    @ViewBuilder
+    private var otherDetailsCard: some View {
+        let hasSize = !currentItem.size.isEmpty && currentItem.size != "N/A"
+        let hasBarcode = !currentItem.barcode.isEmpty
+        let hasCost = (currentItem.unitCost ?? 0) > 0
+        let hasCategory = !currentItem.category.isEmpty
+
+        if hasSize || hasBarcode || hasCost || hasCategory {
+            VStack(spacing: 0) {
+                sectionTitle("Additional Details")
+
+                if hasCategory {
+                    detailRow("Category", currentItem.category)
+                }
+                if hasSize {
+                    detailRow("Size", currentItem.size)
+                }
+                if hasBarcode {
+                    detailRow("Barcode", currentItem.barcode)
+                }
+                if hasCost, let cost = currentItem.unitCost {
+                    detailRow("Unit Cost", String(format: "$%.2f", cost))
+                    detailRow("Total Value", String(format: "$%.2f", currentItem.totalValue))
+                }
+                detailRow(
+                    "Added",
+                    currentItem.dateAdded.formatted(date: .abbreviated, time: .shortened)
+                )
+            }
+            .padding(AppSpacing.lg)
+            .background(
+                RoundedRectangle(cornerRadius: AppRadius.medium)
+                    .fill(AppColors.cardBackground)
+            )
+            .cardShadow()
+        }
     }
 
     @ViewBuilder
@@ -393,26 +569,6 @@ struct ItemDetailView: View {
     // ══════════════════════════════════════════════════════
     // MARK: - Subview Helpers
     // ══════════════════════════════════════════════════════
-
-    private func badge(text: String, color: Color) -> some View {
-        Text(text)
-            .font(AppFonts.footnoteMedium)
-            .foregroundColor(.white)
-            .padding(.horizontal, AppSpacing.sm)
-            .padding(.vertical, 4)
-            .background(Capsule().fill(color))
-    }
-
-    private func quantityDisplay(value: String, label: String, color: Color) -> some View {
-        VStack(spacing: 2) {
-            Text(value)
-                .font(AppFonts.title2)
-                .foregroundColor(color)
-            Text(label)
-                .font(AppFonts.footnote)
-                .foregroundColor(AppColors.textTertiary)
-        }
-    }
 
     private func actionButton(
         title: String,
@@ -556,6 +712,16 @@ struct ItemDetailView: View {
                 clinicID: clinicID,
                 limit: 10
             )
+
+            // Try to resolve lastUpdatedBy for the fallback "Last Restocked"
+            // display. Non-critical — silently ignore failures.
+            if lastRestockLog == nil && !currentItem.lastUpdatedBy.isEmpty {
+                if let user = try? await DatabaseService.shared.getUser(
+                    userID: currentItem.lastUpdatedBy
+                ) {
+                    lastRestockedByName = user.displayName
+                }
+            }
         } catch {
             print("Failed to load history: \(error)")
         }
@@ -564,9 +730,6 @@ struct ItemDetailView: View {
 
 // ══════════════════════════════════════════════════════
 // MARK: - Quantity Adjust Sheet
-//
-// Shared sheet for checkout and add-stock. Mode determines label,
-// button color, and max allowed.
 // ══════════════════════════════════════════════════════
 
 struct QuantityAdjustSheet: View {
@@ -614,7 +777,7 @@ struct QuantityAdjustSheet: View {
     private var maxAllowed: Int {
         switch mode {
         case .checkOut: return item.quantity
-        case .addStock: return 1000  // Arbitrary sanity cap
+        case .addStock: return 1000
         }
     }
 
@@ -747,22 +910,22 @@ struct HistoryLogRow: View {
     NavigationStack {
         ItemDetailView(item: InventoryItem(
             id: "preview",
-            name: "Knee Brace",
-            hcpcsCode: "L1820",
-            lotNumber: "A12345",
-            size: "L",
+            name: "Tens Unit",
+            hcpcsCode: "L9534",
+            lotNumber: "19140",
+            size: "Universal",
             barcode: "012345678905",
-            quantity: 8,
-            originalQuantity: 20,
-            lowStockThreshold: 10,
+            quantity: 71,
+            originalQuantity: 80,
+            lowStockThreshold: 2,
             clinicID: "preview-clinic",
-            category: "Orthopedic",
-            manufacturer: "Breg",
-            unitCost: 45.00,
+            category: "Electrical Stimulation",
+            manufacturer: "Viva Health",
+            unitCost: 129.99,
             lastUpdatedBy: "admin",
             lastUpdated: Date(),
             dateAdded: Date().addingTimeInterval(-86400 * 30),
-            notes: ""
+            notes: "The TENS Unit (Transcutaneous Electrical Nerve Stimulation) is a portable device used for pain relief by sending low-voltage electrical pulses through the skin. It helps reduce muscle pain, joint discomfort, and nerve-related pain by blocking pain signals and promoting natural endorphin release. The device is easy to use, adjustable in intensity, and commonly used for physical therapy, recovery, and chronic pain management."
         ))
     }
     .environmentObject(AuthManager.preview())

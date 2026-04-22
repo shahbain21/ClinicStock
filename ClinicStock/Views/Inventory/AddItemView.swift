@@ -8,9 +8,14 @@
 //  mode — same form, pre-populated, saves via updateItemInfo instead of
 //  addNewItem.
 //
-//  Categories and sizes are loaded from global settings docs (populated
-//  by DatabaseSeeder). If those aren't available, falls back to free
-//  text so the form still works.
+//  HIFI RESTRUCTURE:
+//  - Big bottom Add/Cancel buttons instead of toolbar buttons to match
+//    the hifi's button styling (primary blue + red cancel).
+//  - The form layout itself stays — per decision, hifi is styling
+//    reference only; scope (all 11 fields) unchanged.
+//
+//  Categories and sizes load from global settings docs. Free-text
+//  fallback keeps the form usable before seeding.
 //
 
 import SwiftUI
@@ -21,8 +26,6 @@ struct AddItemView: View {
     @EnvironmentObject var inventoryManager: InventoryManager
     @Environment(\.dismiss) private var dismiss
 
-    // Edit mode: if non-nil, submit updates this item instead of
-    // creating a new one.
     let editingItem: InventoryItem?
 
     init(editingItem: InventoryItem? = nil) {
@@ -76,102 +79,140 @@ struct AddItemView: View {
 
     var body: some View {
         NavigationStack {
-            Form {
-                Section("Basic Info") {
-                    TextField("Name *", text: $name)
-                    TextField("HCPCS Code *", text: $hcpcsCode)
-                        .textInputAutocapitalization(.characters)
-                        .autocorrectionDisabled()
+            VStack(spacing: 0) {
+                Form {
+                    Section("Basic Info") {
+                        TextField("Name *", text: $name)
+                        TextField("HCPCS Code *", text: $hcpcsCode)
+                            .textInputAutocapitalization(.characters)
+                            .autocorrectionDisabled()
 
-                    if categories.isEmpty {
-                        TextField("Category", text: $category)
-                    } else {
-                        Picker("Category", selection: $category) {
-                            ForEach(categories, id: \.self) { Text($0).tag($0) }
+                        if categories.isEmpty {
+                            TextField("Category", text: $category)
+                        } else {
+                            Picker("Category", selection: $category) {
+                                ForEach(categories, id: \.self) { Text($0).tag($0) }
+                            }
+                        }
+
+                        if sizes.isEmpty {
+                            TextField("Size", text: $size)
+                        } else {
+                            Picker("Size", selection: $size) {
+                                ForEach(sizes, id: \.self) { Text($0).tag($0) }
+                            }
                         }
                     }
 
-                    if sizes.isEmpty {
-                        TextField("Size", text: $size)
-                    } else {
-                        Picker("Size", selection: $size) {
-                            ForEach(sizes, id: \.self) { Text($0).tag($0) }
-                        }
-                    }
-                }
-
-                Section("Stock") {
-                    HStack {
-                        Text("Quantity *")
-                        Spacer()
-                        TextField("0", text: $quantity)
-                            .keyboardType(.numberPad)
-                            .multilineTextAlignment(.trailing)
-                            .frame(width: 80)
-                    }
-                    HStack {
-                        Text("Low stock threshold")
-                        Spacer()
-                        TextField("10", text: $threshold)
-                            .keyboardType(.numberPad)
-                            .multilineTextAlignment(.trailing)
-                            .frame(width: 80)
-                    }
-                }
-
-                Section("Identification") {
-                    TextField("Lot number", text: $lotNumber)
-                        .autocorrectionDisabled()
-                    TextField("Barcode / GTIN", text: $barcode)
-                        .autocorrectionDisabled()
-                        .keyboardType(.numberPad)
-                }
-
-                Section("Additional") {
-                    TextField("Manufacturer", text: $manufacturer)
-                    HStack {
-                        Text("Unit cost")
-                        Spacer()
-                        Text("$")
-                            .foregroundColor(AppColors.textTertiary)
-                        TextField("0.00", text: $unitCost)
-                            .keyboardType(.decimalPad)
-                            .multilineTextAlignment(.trailing)
-                            .frame(width: 80)
-                    }
-                    TextField("Notes", text: $notes, axis: .vertical)
-                        .lineLimit(3...6)
-                }
-
-                if let error = errorMessage {
-                    Section {
+                    Section("Stock") {
                         HStack {
-                            Image(systemName: "exclamationmark.circle.fill")
-                                .foregroundColor(AppColors.danger)
-                            Text(error)
-                                .foregroundColor(AppColors.danger)
-                                .font(AppFonts.caption)
+                            Text("Quantity *")
+                            Spacer()
+                            TextField("0", text: $quantity)
+                                .keyboardType(.numberPad)
+                                .multilineTextAlignment(.trailing)
+                                .frame(width: 80)
+                        }
+                        HStack {
+                            Text("Low stock threshold")
+                            Spacer()
+                            TextField("10", text: $threshold)
+                                .keyboardType(.numberPad)
+                                .multilineTextAlignment(.trailing)
+                                .frame(width: 80)
+                        }
+                    }
+
+                    Section("Identification") {
+                        TextField("Lot number", text: $lotNumber)
+                            .autocorrectionDisabled()
+                        TextField("Barcode / GTIN", text: $barcode)
+                            .autocorrectionDisabled()
+                            .keyboardType(.numberPad)
+                    }
+
+                    Section("Additional") {
+                        // Labeled "Supplier" in the UI per hifi, but the
+                        // underlying field is still `manufacturer` on the
+                        // model (no schema churn).
+                        TextField("Supplier", text: $manufacturer)
+                        HStack {
+                            Text("Unit cost")
+                            Spacer()
+                            Text("$")
+                                .foregroundColor(AppColors.textTertiary)
+                            TextField("0.00", text: $unitCost)
+                                .keyboardType(.decimalPad)
+                                .multilineTextAlignment(.trailing)
+                                .frame(width: 80)
+                        }
+                        // Labeled "Description" — the Item Detail screen
+                        // displays this as the "Item Description" card.
+                        TextField(
+                            "Description",
+                            text: $notes,
+                            axis: .vertical
+                        )
+                        .lineLimit(3...6)
+                    }
+
+                    if let error = errorMessage {
+                        Section {
+                            HStack {
+                                Image(systemName: "exclamationmark.circle.fill")
+                                    .foregroundColor(AppColors.danger)
+                                Text(error)
+                                    .foregroundColor(AppColors.danger)
+                                    .font(AppFonts.caption)
+                            }
                         }
                     }
                 }
+
+                // ── Bottom button stack (hifi styling) ──
+                VStack(spacing: AppSpacing.sm) {
+                    Button(action: submit) {
+                        HStack {
+                            if isSaving {
+                                ProgressView()
+                                    .progressViewStyle(
+                                        CircularProgressViewStyle(tint: .white)
+                                    )
+                            } else {
+                                Text(isEditing ? "Save" : "Add")
+                            }
+                        }
+                        .font(AppFonts.bodySemibold)
+                        .foregroundColor(.white)
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 52)
+                        .background(
+                            RoundedRectangle(cornerRadius: AppRadius.medium)
+                                .fill(isFormValid ? AppColors.primary : AppColors.border)
+                        )
+                    }
+                    .disabled(!isFormValid || isSaving)
+
+                    Button(action: { dismiss() }) {
+                        Text("Cancel")
+                            .font(AppFonts.bodySemibold)
+                            .foregroundColor(.white)
+                            .frame(maxWidth: .infinity)
+                            .frame(height: 52)
+                            .background(
+                                RoundedRectangle(cornerRadius: AppRadius.medium)
+                                    .fill(AppColors.danger)
+                            )
+                    }
+                    .disabled(isSaving)
+                }
+                .padding(.horizontal, AppSpacing.lg)
+                .padding(.top, AppSpacing.md)
+                .padding(.bottom, AppSpacing.lg)
+                .background(AppColors.background)
             }
             .navigationTitle(isEditing ? "Edit Item" : "Add Item")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    Button("Cancel") { dismiss() }
-                }
-                ToolbarItem(placement: .topBarTrailing) {
-                    if isSaving {
-                        ProgressView()
-                    } else {
-                        Button(isEditing ? "Save" : "Add") {
-                            submit()
-                        }
-                        .disabled(!isFormValid)
-                    }
-                }
-            }
+            .navigationBarTitleDisplayMode(.large)
             .task {
                 await loadSettings()
             }
@@ -187,9 +228,6 @@ struct AddItemView: View {
             categories = try await DatabaseService.shared.getCategories()
             sizes = try await DatabaseService.shared.getSizes()
 
-            // If the current value isn't in the loaded list (e.g. editing
-            // an item whose category was later removed), keep it in the
-            // picker so the value doesn't appear blank.
             if !categories.isEmpty && !categories.contains(category) {
                 categories.insert(category, at: 0)
             }
@@ -262,8 +300,6 @@ struct AddItemView: View {
         }
     }
 
-    // Edit path. Builds the updates dict and a human-readable description
-    // of what changed (for the audit log).
     private func submitEdit(
         existing: InventoryItem,
         itemID: String,
@@ -310,7 +346,7 @@ struct AddItemView: View {
         }
         if manufacturer != existing.manufacturer {
             updates["manufacturer"] = manufacturer
-            changes.append("manufacturer")
+            changes.append("supplier")
         }
         if unitCost != (existing.unitCost ?? 0) {
             updates["unitCost"] = unitCost
@@ -318,19 +354,14 @@ struct AddItemView: View {
         }
         if notes != existing.notes {
             updates["notes"] = notes
-            changes.append("notes")
+            changes.append("description")
         }
-
-        // Quantity changes via the edit form are treated as info updates
-        // for audit purposes. Larger quantity changes should use
-        // addStock / checkOut flows instead.
         if quantity != existing.quantity {
             updates["quantity"] = quantity
             changes.append("quantity \(existing.quantity)→\(quantity)")
         }
 
         guard !updates.isEmpty else {
-            // Nothing changed — just dismiss
             return
         }
 
@@ -358,22 +389,22 @@ struct AddItemView: View {
 #Preview("Edit") {
     AddItemView(editingItem: InventoryItem(
         id: "preview",
-        name: "Knee Brace",
-        hcpcsCode: "L1820",
-        lotNumber: "A12345",
-        size: "L",
+        name: "Tens Unit",
+        hcpcsCode: "L9534",
+        lotNumber: "19140",
+        size: "Universal",
         barcode: "",
-        quantity: 8,
-        originalQuantity: 20,
-        lowStockThreshold: 10,
+        quantity: 71,
+        originalQuantity: 80,
+        lowStockThreshold: 2,
         clinicID: "preview-clinic",
-        category: "Orthopedic",
-        manufacturer: "Breg",
-        unitCost: 45.00,
+        category: "Electrical Stimulation",
+        manufacturer: "Viva Health",
+        unitCost: 129.99,
         lastUpdatedBy: "admin",
         lastUpdated: Date(),
         dateAdded: Date(),
-        notes: ""
+        notes: "Portable TENS unit for pain relief."
     ))
     .environmentObject(AuthManager.preview())
     .environmentObject(InventoryManager())

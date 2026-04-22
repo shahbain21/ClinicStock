@@ -4,18 +4,17 @@
 //
 //  Created by Mohamed Shahbain
 //
-//  FIXES:
-//  - Listener lifecycle removed. RootView's .task(id:) is now the single
-//    owner of startListening/stopListening.
-//  - DashboardPlaceholder removed — wires in the real DashboardView.
-//  - SettingsPlaceholder extracted to SettingsView.swift.
-//  - ScannerPlaceholder replaced with real ScanTabView — fast-checkout
-//    flow for staff (scan → confirm → done).
-//  - Unused @EnvironmentObject on CustomTabBar removed.
-//  - Preview uses AuthManager.preview().
+//  LAYOUT FIX:
+//  - Tab bar now has a top divider line + softer shadow to better
+//    separate it from the content above. Previously the shadow alone
+//    was too subtle against dark backgrounds.
 //
-//  HistoryPlaceholder still lives here as a stub. Replace with a real
-//  HistoryView (paginated, filterable) when scoped as its own feature.
+//  PRIOR FIXES (carried forward):
+//  - Listener lifecycle removed. RootView's .task(id:) owns it.
+//  - Real tabs wired: DashboardView, InventoryListView, ScanTabView,
+//    SettingsView.
+//  - HistoryPlaceholder remains as a stub until full History view lands.
+//  - Preview uses AuthManager.preview().
 //
 
 import SwiftUI
@@ -30,7 +29,6 @@ struct MainTabView: View {
     var body: some View {
         ZStack(alignment: .bottom) {
 
-            // ── Tab Content ──
             TabView(selection: $selectedTab) {
 
                 DashboardView()
@@ -49,7 +47,6 @@ struct MainTabView: View {
                     .tag(4)
             }
 
-            // ── Custom Tab Bar ──
             CustomTabBar(selectedTab: $selectedTab)
         }
         .ignoresSafeArea(.keyboard)
@@ -65,19 +62,26 @@ struct CustomTabBar: View {
     @Binding var selectedTab: Int
 
     var body: some View {
-        HStack {
-            tabButton(icon: "chart.bar.fill", title: "Dashboard", tab: 0)
-            tabButton(icon: "shippingbox.fill", title: "Inventory", tab: 1)
-            tabButton(icon: "barcode.viewfinder", title: "Scan", tab: 2)
-            tabButton(icon: "clock.fill", title: "History", tab: 3)
-            tabButton(icon: "gearshape.fill", title: "Settings", tab: 4)
+        VStack(spacing: 0) {
+            // Top divider — visual anchor separating from content above
+            Rectangle()
+                .fill(AppColors.border.opacity(0.3))
+                .frame(height: 1)
+
+            HStack {
+                tabButton(icon: "chart.bar.fill", title: "Dashboard", tab: 0)
+                tabButton(icon: "shippingbox.fill", title: "Inventory", tab: 1)
+                tabButton(icon: "barcode.viewfinder", title: "Scan", tab: 2)
+                tabButton(icon: "clock.fill", title: "History", tab: 3)
+                tabButton(icon: "gearshape.fill", title: "Settings", tab: 4)
+            }
+            .padding(.horizontal, AppSpacing.sm)
+            .padding(.top, AppSpacing.md)
+            .padding(.bottom, AppSpacing.xxl)
         }
-        .padding(.horizontal, AppSpacing.sm)
-        .padding(.top, AppSpacing.md)
-        .padding(.bottom, AppSpacing.xxl)
         .background(
             AppColors.tabBarBackground
-                .shadow(color: .black.opacity(0.3), radius: 16, y: -8)
+                .shadow(color: .black.opacity(0.15), radius: 8, y: -2)
                 .ignoresSafeArea(edges: .bottom)
         )
     }
