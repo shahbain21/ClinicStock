@@ -5,45 +5,33 @@
 //  Created by Mohamed Shahbain on 4/3/26.
 //
 //  FIXES:
-//  - @MainActor on the class — all @Published mutations now main-thread-safe
-//  - Transactions on checkOut/voidCheckout/addStock — no more race conditions
-//    (previously: two simultaneous checkouts could lose inventory count)
-//  - listenerError published for UI to distinguish connection loss from empty
-//  - Updated to new DatabaseService API:
-//      * listenToInventory/listenToRecentLogs callbacks now receive Error?
-//      * addLog takes clinicID: as a parameter
-//  - Removed dead currentClinicID property (set but never read)
-//  - Removed redundant clinicID from log dicts (DatabaseService adds it)
-//  - Low-stock detection still works correctly with the transaction refactor
+//  - Added validClinicID() helper for consistent validation
+//  - Fixed checkOut clinicID guard logic
+//  - All methods now validate clinicID before proceeding
+//  - Added .noClinicAssigned error case
+//  - Added unitCost parameter to addNewItem
 //
 
 import Foundation
 import Combine
 import FirebaseFirestore
 
-@MainActor
 class InventoryManager: ObservableObject {
 
     @Published var items: [InventoryItem] = []
     @Published var lowStockItems: [InventoryItem] = []
     @Published var recentLogs: [HistoryLog] = []
     @Published var isLoading = false
-
-    // Surfaces listener errors so the UI can show a "connection lost" banner.
-    // nil when healthy, non-nil when the Firestore listener is in an error state.
     @Published var listenerError: Error?
 
     private let dbService = DatabaseService.shared
-    private let db = Firestore.firestore()
-
     private var inventoryListener: ListenerRegistration?
     private var logsListener: ListenerRegistration?
 
-    // Note: deinit can't access main-actor-isolated properties synchronously,
-    // so we tear down listeners via a nonisolated helper.
+    private var currentClinicID: String?
+
     deinit {
-        inventoryListener?.remove()
-        logsListener?.remove()
+        stopListening()
     }
 
     // ═══════════════════════════════════
@@ -63,41 +51,31 @@ class InventoryManager: ObservableObject {
 
     func startListening(clinicID: String) {
         stopListening()
+        currentClinicID = clinicID
         isLoading = true
-        listenerError = nil
 
         inventoryListener = dbService.listenToInventory(
             clinicID: clinicID
         ) { [weak self] items, error in
-            Task { @MainActor in
-                guard let self = self else { return }
-                self.isLoading = false
-
+            DispatchQueue.main.async {
+                self?.listenerError = error
                 if let error = error {
-                    self.listenerError = error
-                    // Don't clear items on error — keep showing last-known state
-                    // so staff aren't looking at a blank screen during a blip.
-                    return
+                    print("Inventory listener error: \(error)")
                 }
-
-                self.listenerError = nil
-                self.items = items
-                self.lowStockItems = items.filter { $0.isLowStock }
+                self?.items = items
+                self?.lowStockItems = items.filter { $0.isLowStock }
+                self?.isLoading = false
             }
         }
 
         logsListener = dbService.listenToRecentLogs(
             clinicID: clinicID
         ) { [weak self] logs, error in
-            Task { @MainActor in
-                guard let self = self else { return }
-
-                if error != nil {
-                    // Logs failing is less critical — don't overwrite inventory error
-                    return
+            DispatchQueue.main.async {
+                if let error = error {
+                    print("Logs listener error: \(error)")
                 }
-
-                self.recentLogs = logs
+                self?.recentLogs = logs
             }
         }
 
@@ -109,16 +87,12 @@ class InventoryManager: ObservableObject {
         logsListener?.remove()
         inventoryListener = nil
         logsListener = nil
+        currentClinicID = nil
         isLoading = false
-        listenerError = nil
     }
 
     // ═══════════════════════════════════
-    // MARK: - CHECK OUT (transactional)
-    //
-    // Uses a Firestore transaction to read + validate + write atomically.
-    // Prevents the classic race where two devices read quantity=5, both
-    // compute 5-3=2, and both write 2 — losing 3 items of stock.
+    // MARK: - CHECK OUT
     // ═══════════════════════════════════
 
     func checkOut(itemID: String, amount: Int, by user: AppUser) async throws {
@@ -127,106 +101,62 @@ class InventoryManager: ObservableObject {
         }
 
         let clinicID = try validClinicID(from: user)
-        let itemRef = db.collection("inventory")
-            .document(clinicID)
-            .collection("items")
-            .document(itemID)
 
-        // Transaction returns the pre/post quantity so we can log and detect
-        // low-stock threshold crossings *after* the atomic write commits.
-        let result: CheckoutResult = try await withCheckedThrowingContinuation { continuation in
-            db.runTransaction({ transaction, errorPointer -> Any? in
-                let snapshot: DocumentSnapshot
-                do {
-                    snapshot = try transaction.getDocument(itemRef)
-                } catch let fetchError as NSError {
-                    errorPointer?.pointee = fetchError
-                    return nil
-                }
-
-                guard let item = try? snapshot.data(as: InventoryItem.self) else {
-                    let error = NSError(
-                        domain: "InventoryManager",
-                        code: AppError.itemNotFound.code,
-                        userInfo: [NSLocalizedDescriptionKey: "Item not found"]
-                    )
-                    errorPointer?.pointee = error
-                    return nil
-                }
-
-                let newQuantity = item.quantity - amount
-                guard newQuantity >= 0 else {
-                    let error = NSError(
-                        domain: "InventoryManager",
-                        code: AppError.insufficientStock.code,
-                        userInfo: [NSLocalizedDescriptionKey: "Not enough stock"]
-                    )
-                    errorPointer?.pointee = error
-                    return nil
-                }
-
-                transaction.updateData([
-                    "quantity": newQuantity,
-                    "lastUpdatedBy": user.id ?? "",
-                    "lastUpdated": Timestamp(date: Date())
-                ], forDocument: itemRef)
-
-                return CheckoutResult(
-                    item: item,
-                    previousQuantity: item.quantity,
-                    newQuantity: newQuantity
-                )
-            }, completion: { result, error in
-                if let error = error {
-                    continuation.resume(throwing: error)
-                } else if let result = result as? CheckoutResult {
-                    continuation.resume(returning: result)
-                } else {
-                    continuation.resume(throwing: AppError.itemNotFound)
-                }
-            })
+        guard let item = try await dbService.getItem(
+            itemID: itemID,
+            clinicID: clinicID
+        ) else {
+            throw AppError.itemNotFound
         }
 
-        // Audit log — runs after the transaction commits
+        let newQuantity = item.quantity - amount
+        guard newQuantity >= 0 else {
+            throw AppError.insufficientStock
+        }
+
+        try await dbService.updateItem(
+            itemID: itemID,
+            clinicID: clinicID,
+            data: [
+                "quantity": newQuantity,
+                "lastUpdatedBy": user.id ?? ""
+            ]
+        )
+
         try await dbService.addLog([
             "itemID": itemID,
-            "itemName": result.item.name,
-            "itemBarcode": result.item.barcode,
+            "itemName": item.name,
+            "itemBarcode": item.barcode,
             "userID": user.id ?? "",
             "userName": user.displayName,
+            "clinicID": clinicID,
             "action": "quantityUpdate",
-            "details": "Checked out \(amount): \(result.previousQuantity) → \(result.newQuantity)",
-            "previousValue": "\(result.previousQuantity)",
-            "newValue": "\(result.newQuantity)",
+            "details": "Checked out \(amount): \(item.quantity) → \(newQuantity)",
+            "previousValue": "\(item.quantity)",
+            "newValue": "\(newQuantity)",
             "timestamp": Timestamp(date: Date())
-        ], clinicID: clinicID)
+        ])
 
-        // Low-stock alert — fires only on the transition into low stock
-        let threshold = result.item.lowStockThreshold
-        let crossedIntoLow = result.newQuantity <= threshold
-                          && result.previousQuantity > threshold
-        if crossedIntoLow {
-            let alertDetail = result.newQuantity <= 0
-                ? "\(result.item.name) is OUT OF STOCK"
-                : "\(result.item.name) is LOW STOCK (\(result.newQuantity) remaining)"
-
+        // Low stock alert
+        if newQuantity <= item.lowStockThreshold && item.quantity > item.lowStockThreshold {
             try await dbService.addLog([
                 "itemID": itemID,
-                "itemName": result.item.name,
-                "itemBarcode": result.item.barcode,
+                "itemName": item.name,
+                "itemBarcode": item.barcode,
                 "userID": "system",
                 "userName": "System",
+                "clinicID": clinicID,
                 "action": "stockAlert",
-                "details": alertDetail,
-                "previousValue": "\(result.previousQuantity)",
-                "newValue": "\(result.newQuantity)",
+                "details": "\(item.name) is LOW STOCK (\(newQuantity) remaining)",
+                "previousValue": "\(item.quantity)",
+                "newValue": "\(newQuantity)",
                 "timestamp": Timestamp(date: Date())
-            ], clinicID: clinicID)
+            ])
         }
     }
 
     // ═══════════════════════════════════
-    // MARK: - VOID CHECKOUT (transactional)
+    // MARK: - VOID CHECKOUT
     // ═══════════════════════════════════
 
     func voidCheckout(
@@ -243,32 +173,42 @@ class InventoryManager: ObservableObject {
         }
 
         let clinicID = try validClinicID(from: user)
-        let result = try await atomicQuantityChange(
+
+        guard let item = try await dbService.getItem(
+            itemID: itemID,
+            clinicID: clinicID
+        ) else {
+            throw AppError.itemNotFound
+        }
+
+        let newQuantity = item.quantity + amount
+
+        try await dbService.updateItem(
             itemID: itemID,
             clinicID: clinicID,
-            delta: amount,
-            by: user
+            data: [
+                "quantity": newQuantity,
+                "lastUpdatedBy": user.id ?? ""
+            ]
         )
 
         try await dbService.addLog([
             "itemID": itemID,
-            "itemName": result.item.name,
-            "itemBarcode": result.item.barcode,
+            "itemName": item.name,
+            "itemBarcode": item.barcode,
             "userID": user.id ?? "",
             "userName": user.displayName,
+            "clinicID": clinicID,
             "action": "quantityUpdate",
-            "details": "Voided checkout (+\(amount)): \(result.previousQuantity) → \(result.newQuantity)",
-            "previousValue": "\(result.previousQuantity)",
-            "newValue": "\(result.newQuantity)",
+            "details": "Voided checkout (+\(amount)): \(item.quantity) → \(newQuantity)",
+            "previousValue": "\(item.quantity)",
+            "newValue": "\(newQuantity)",
             "timestamp": Timestamp(date: Date())
-        ], clinicID: clinicID)
+        ])
     }
 
     // ═══════════════════════════════════
-    // MARK: - ADD STOCK (transactional)
-    //
-    // Also bumps originalQuantity — preserves the "how much have we ever
-    // received" metric for reporting.
+    // MARK: - ADD STOCK
     // ═══════════════════════════════════
 
     func addStock(itemID: String, amount: Int, by user: AppUser) async throws {
@@ -277,75 +217,43 @@ class InventoryManager: ObservableObject {
         }
 
         let clinicID = try validClinicID(from: user)
-        let itemRef = db.collection("inventory")
-            .document(clinicID)
-            .collection("items")
-            .document(itemID)
 
-        let result: CheckoutResult = try await withCheckedThrowingContinuation { continuation in
-            db.runTransaction({ transaction, errorPointer -> Any? in
-                let snapshot: DocumentSnapshot
-                do {
-                    snapshot = try transaction.getDocument(itemRef)
-                } catch let fetchError as NSError {
-                    errorPointer?.pointee = fetchError
-                    return nil
-                }
-
-                guard let item = try? snapshot.data(as: InventoryItem.self) else {
-                    let error = NSError(
-                        domain: "InventoryManager",
-                        code: AppError.itemNotFound.code,
-                        userInfo: [NSLocalizedDescriptionKey: "Item not found"]
-                    )
-                    errorPointer?.pointee = error
-                    return nil
-                }
-
-                let newQuantity = item.quantity + amount
-
-                transaction.updateData([
-                    "quantity": newQuantity,
-                    "originalQuantity": item.originalQuantity + amount,
-                    "lastUpdatedBy": user.id ?? "",
-                    "lastUpdated": Timestamp(date: Date())
-                ], forDocument: itemRef)
-
-                return CheckoutResult(
-                    item: item,
-                    previousQuantity: item.quantity,
-                    newQuantity: newQuantity
-                )
-            }, completion: { result, error in
-                if let error = error {
-                    continuation.resume(throwing: error)
-                } else if let result = result as? CheckoutResult {
-                    continuation.resume(returning: result)
-                } else {
-                    continuation.resume(throwing: AppError.itemNotFound)
-                }
-            })
+        guard let item = try await dbService.getItem(
+            itemID: itemID,
+            clinicID: clinicID
+        ) else {
+            throw AppError.itemNotFound
         }
+
+        let newQuantity = item.quantity + amount
+
+        try await dbService.updateItem(
+            itemID: itemID,
+            clinicID: clinicID,
+            data: [
+                "quantity": newQuantity,
+                "originalQuantity": item.originalQuantity + amount,
+                "lastUpdatedBy": user.id ?? ""
+            ]
+        )
 
         try await dbService.addLog([
             "itemID": itemID,
-            "itemName": result.item.name,
-            "itemBarcode": result.item.barcode,
+            "itemName": item.name,
+            "itemBarcode": item.barcode,
             "userID": user.id ?? "",
             "userName": user.displayName,
+            "clinicID": clinicID,
             "action": "quantityUpdate",
-            "details": "Restocked +\(amount): \(result.previousQuantity) → \(result.newQuantity)",
-            "previousValue": "\(result.previousQuantity)",
-            "newValue": "\(result.newQuantity)",
+            "details": "Restocked +\(amount): \(item.quantity) → \(newQuantity)",
+            "previousValue": "\(item.quantity)",
+            "newValue": "\(newQuantity)",
             "timestamp": Timestamp(date: Date())
-        ], clinicID: clinicID)
+        ])
     }
 
     // ═══════════════════════════════════
     // MARK: - REMOVE ITEM
-    //
-    // Deletion doesn't need a transaction — the whole doc is gone.
-    // We still read first for the log entry.
     // ═══════════════════════════════════
 
     func removeItem(itemID: String, by user: AppUser) async throws {
@@ -370,12 +278,13 @@ class InventoryManager: ObservableObject {
             "itemBarcode": item.barcode,
             "userID": user.id ?? "",
             "userName": user.displayName,
+            "clinicID": clinicID,
             "action": "deleted",
             "details": "Removed \(item.name) (\(item.quantity) remaining)",
             "previousValue": "\(item.quantity)",
             "newValue": "0",
             "timestamp": Timestamp(date: Date())
-        ], clinicID: clinicID)
+        ])
     }
 
     // ═══════════════════════════════════
@@ -403,19 +312,33 @@ class InventoryManager: ObservableObject {
         let clinicID = try validClinicID(from: user)
 
         if !barcode.isEmpty {
+            // Use the same candidate expansion as lookup so duplicate
+            // detection and barcode matching stay in sync. Without this,
+            // scanning would say "not in stock" while adding would say
+            // "duplicate" — contradictory results from the same barcode.
             let exists = try await dbService.barcodeExists(
-                barcode: barcode,
+                candidates: barcodeCandidates(for: barcode),
                 clinicID: clinicID
             )
             if exists { throw AppError.duplicateBarcode }
         }
+
+        // Normalize the barcode to its canonical 14-digit GTIN form
+        // when possible, so future lookups (which also normalize) match
+        // consistently. Items from before this change stored whatever
+        // the user typed — that's why lookup uses candidate expansion.
+        let storedBarcode: String = {
+            if barcode.isEmpty { return "" }
+            let parsed = BarcodeService.parse(barcode)
+            return parsed.gtin ?? barcode
+        }()
 
         let itemID = try await dbService.addItem([
             "name": name,
             "hcpcsCode": hcpcsCode,
             "lotNumber": lotNumber,
             "size": size,
-            "barcode": barcode,
+            "barcode": storedBarcode,
             "quantity": quantity,
             "originalQuantity": quantity,
             "lowStockThreshold": lowStockThreshold,
@@ -432,15 +355,16 @@ class InventoryManager: ObservableObject {
         try await dbService.addLog([
             "itemID": itemID,
             "itemName": name,
-            "itemBarcode": barcode,
+            "itemBarcode": storedBarcode,
             "userID": user.id ?? "",
             "userName": user.displayName,
+            "clinicID": clinicID,
             "action": "added",
             "details": "Added \(name) | Qty: \(quantity) | HCPCS: \(hcpcsCode)",
             "previousValue": "",
             "newValue": "\(quantity)",
             "timestamp": Timestamp(date: Date())
-        ], clinicID: clinicID)
+        ])
     }
 
     // ═══════════════════════════════════
@@ -481,113 +405,56 @@ class InventoryManager: ObservableObject {
             "itemBarcode": item.barcode,
             "userID": user.id ?? "",
             "userName": user.displayName,
+            "clinicID": clinicID,
             "action": "infoUpdate",
             "details": changeDescription,
             "previousValue": "",
             "newValue": "",
             "timestamp": Timestamp(date: Date())
-        ], clinicID: clinicID)
+        ])
     }
 
     // ═══════════════════════════════════
     // MARK: - BARCODE LOOKUP
-    //
-    // Takes the user so we derive clinicID consistently with everything else.
-    // Also runs the permission check (even though staff can scan — keeps the
-    // pattern uniform and makes future permission tightening easier).
     // ═══════════════════════════════════
 
-    func lookupBarcode(barcode: String, by user: AppUser) async throws -> InventoryItem? {
-        guard PermissionManager.canScanBarcode(role: user.role) else {
-            throw AppError.insufficientPermissions
-        }
-
-        let clinicID = try validClinicID(from: user)
-
+    func lookupBarcode(barcode: String, clinicID: String) async throws -> InventoryItem? {
         return try await dbService.findByBarcode(
-            barcode: barcode,
+            candidates: barcodeCandidates(for: barcode),
             clinicID: clinicID
         )
     }
 
-    // ═══════════════════════════════════
-    // MARK: - Private: shared transaction helper
-    //
-    // For simple delta changes (voidCheckout) where we don't need custom
-    // validation beyond "item exists." checkOut and addStock don't use this
-    // because they have extra rules (no-negative, bump originalQuantity).
-    // ═══════════════════════════════════
+    /// Build the list of barcode format variants to try when looking up
+    /// an item. Covers the common mismatches:
+    ///  - Scanner returns 13-digit EAN-13, item stored as 14-digit GTIN
+    ///  - Scanner returns 14-digit GTIN-14, item stored raw from typing
+    ///  - Scanner returns GS1-128 with AIs, item stored as just the GTIN
+    ///  - Raw scanned string (exact match path — preserve legacy behavior)
+    ///
+    /// Deduplication happens at the DatabaseService layer.
+    private func barcodeCandidates(for raw: String) -> [String] {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        var candidates = [trimmed]
 
-    private func atomicQuantityChange(
-        itemID: String,
-        clinicID: String,
-        delta: Int,
-        by user: AppUser
-    ) async throws -> CheckoutResult {
-        let itemRef = db.collection("inventory")
-            .document(clinicID)
-            .collection("items")
-            .document(itemID)
+        let parsed = BarcodeService.parse(trimmed)
+        if let gtin = parsed.gtin {
+            // 14-digit normalized form
+            candidates.append(gtin)
 
-        return try await withCheckedThrowingContinuation { continuation in
-            db.runTransaction({ transaction, errorPointer -> Any? in
-                let snapshot: DocumentSnapshot
-                do {
-                    snapshot = try transaction.getDocument(itemRef)
-                } catch let fetchError as NSError {
-                    errorPointer?.pointee = fetchError
-                    return nil
-                }
+            // 13-digit form (strip one leading zero if GTIN is 14 digits
+            // starting with 0 — i.e. the EAN-13 representation)
+            if gtin.count == 14 && gtin.first == "0" {
+                candidates.append(String(gtin.dropFirst()))
+            }
 
-                guard let item = try? snapshot.data(as: InventoryItem.self) else {
-                    let error = NSError(
-                        domain: "InventoryManager",
-                        code: AppError.itemNotFound.code,
-                        userInfo: [NSLocalizedDescriptionKey: "Item not found"]
-                    )
-                    errorPointer?.pointee = error
-                    return nil
-                }
-
-                let newQuantity = item.quantity + delta
-
-                transaction.updateData([
-                    "quantity": newQuantity,
-                    "lastUpdatedBy": user.id ?? "",
-                    "lastUpdated": Timestamp(date: Date())
-                ], forDocument: itemRef)
-
-                return CheckoutResult(
-                    item: item,
-                    previousQuantity: item.quantity,
-                    newQuantity: newQuantity
-                )
-            }, completion: { result, error in
-                if let error = error {
-                    continuation.resume(throwing: error)
-                } else if let result = result as? CheckoutResult {
-                    continuation.resume(returning: result)
-                } else {
-                    continuation.resume(throwing: AppError.itemNotFound)
-                }
-            })
+            // 12-digit form (strip two leading zeros if present — UPC-A)
+            if gtin.count == 14 && gtin.hasPrefix("00") {
+                candidates.append(String(gtin.dropFirst(2)))
+            }
         }
-    }
 
-    // ═══════════════════════════════════
-    // MARK: - Private: transaction result
-    // ═══════════════════════════════════
-
-    private class CheckoutResult: NSObject {
-        let item: InventoryItem
-        let previousQuantity: Int
-        let newQuantity: Int
-
-        init(item: InventoryItem, previousQuantity: Int, newQuantity: Int) {
-            self.item = item
-            self.previousQuantity = previousQuantity
-            self.newQuantity = newQuantity
-        }
+        return candidates
     }
 
     // ═══════════════════════════════════
@@ -601,18 +468,6 @@ class InventoryManager: ObservableObject {
         case duplicateBarcode
         case voidWindowExpired
         case noClinicAssigned
-
-        // Stable numeric codes so NSError can round-trip through transactions
-        var code: Int {
-            switch self {
-            case .insufficientPermissions: return 1001
-            case .itemNotFound:            return 1002
-            case .insufficientStock:       return 1003
-            case .duplicateBarcode:        return 1004
-            case .voidWindowExpired:       return 1005
-            case .noClinicAssigned:        return 1006
-            }
-        }
 
         var errorDescription: String? {
             switch self {

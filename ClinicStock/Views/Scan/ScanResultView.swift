@@ -1,44 +1,45 @@
 //
-//  ScanResult.swift
-//  ClinicStock
-//
-//  Created by Mohamed Shahbain on 4/21/26.
-//
-
-
-//
 //  ScanResultView.swift
 //  ClinicStock
 //
-//  Shown after the Scan tab resolves a barcode. Three states:
+//  Shown after the Scan tab resolves a barcode. Four states now:
 //
-//    .itemInStock  — barcode matched an inventory item in this clinic.
-//                    Primary action: check out. Secondary: view details,
-//                    scan another.
+//    .itemInStock     — barcode matched an inventory item in this clinic.
+//                       Primary action: check out. Secondary: view details,
+//                       scan another.
 //
-//    .catalogOnly  — barcode matched a catalog entry but we don't have
-//                    this item in stock yet. Editor+: "Add to Inventory".
-//                    Staff: informational, tell an editor.
+//    .catalogOnly     — barcode matched a catalog entry but we don't have
+//                       this item in stock yet. Editor+: "Add to Inventory".
+//                       Staff: informational, tell an editor.
 //
-//    .notFound     — barcode wasn't recognized at all. Just "Try Again"
-//                    / "Cancel".
+//    .unmatchedGTIN   — NEW. The barcode parsed as a valid GTIN (with
+//                       correct check digit) but we have no catalog entry
+//                       for it yet. Different from notFound — this is
+//                       actionable. Staff can search the catalog by name
+//                       and tap a result to link the GTIN; editor+ can
+//                       also add as a new item.
+//
+//    .notFound        — barcode wasn't a valid HCPCS or GTIN. Just
+//                       "Try Again" / "Cancel".
 //
 
 import SwiftUI
 
-enum ScanResult {
+enum ScanOutcome {
     case itemInStock(InventoryItem)
     case catalogOnly(HCPCSCatalogItem, gtin: String?)
+    case unmatchedGTIN(gtin: String, parsed: ParsedBarcode)
     case notFound(scannedValue: String)
 }
 
 struct ScanResultView: View {
 
-    let result: ScanResult
+    let result: ScanOutcome
 
     var onCheckOut: (() -> Void)?
     var onViewDetails: (() -> Void)?
     var onAddToInventory: (() -> Void)?
+    var onLinkToExisting: (() -> Void)?
     var onTryAgain: () -> Void
     var onDismiss: () -> Void
 
@@ -87,6 +88,7 @@ struct ScanResultView: View {
         switch result {
         case .itemInStock: return "checkmark.circle.fill"
         case .catalogOnly: return "exclamationmark.circle.fill"
+        case .unmatchedGTIN: return "questionmark.circle.fill"
         case .notFound: return "xmark.circle.fill"
         }
     }
@@ -95,6 +97,7 @@ struct ScanResultView: View {
         switch result {
         case .itemInStock: return AppColors.success
         case .catalogOnly: return AppColors.warning
+        case .unmatchedGTIN: return AppColors.warning
         case .notFound: return AppColors.danger
         }
     }
@@ -103,6 +106,7 @@ struct ScanResultView: View {
         switch result {
         case .itemInStock: return "Item Found"
         case .catalogOnly: return "Not in Stock"
+        case .unmatchedGTIN: return "New Barcode"
         case .notFound: return "Not Recognized"
         }
     }
@@ -118,6 +122,8 @@ struct ScanResultView: View {
             inStockCard(item: item)
         case .catalogOnly(let catalog, _):
             catalogOnlyCard(catalog: catalog)
+        case .unmatchedGTIN(let gtin, let parsed):
+            unmatchedGTINCard(gtin: gtin, parsed: parsed)
         case .notFound(let scannedValue):
             notFoundCard(value: scannedValue)
         }
@@ -195,6 +201,32 @@ struct ScanResultView: View {
         .cardShadow()
     }
 
+    private func unmatchedGTINCard(gtin: String, parsed: ParsedBarcode) -> some View {
+        VStack(alignment: .leading, spacing: AppSpacing.md) {
+            detailLine(label: "Barcode", value: gtin)
+
+            if let lot = parsed.lotNumber {
+                detailLine(label: "Lot", value: lot)
+            }
+            if let productCode = parsed.productCode {
+                detailLine(label: "Product Code", value: productCode)
+            }
+
+            Divider()
+
+            Text("We captured a valid barcode but haven't seen this product before. Search the catalog by name to link this barcode, or add it as a new item.")
+                .font(AppFonts.caption)
+                .foregroundColor(AppColors.textSecondary)
+        }
+        .padding(AppSpacing.lg)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: AppRadius.medium)
+                .fill(AppColors.cardBackground)
+        )
+        .cardShadow()
+    }
+
     private func notFoundCard(value: String) -> some View {
         VStack(alignment: .leading, spacing: AppSpacing.md) {
             Text("Scanned code")
@@ -253,6 +285,9 @@ struct ScanResultView: View {
         case .catalogOnly:
             catalogOnlyActions
 
+        case .unmatchedGTIN:
+            unmatchedGTINActions
+
         case .notFound:
             notFoundActions
         }
@@ -260,7 +295,6 @@ struct ScanResultView: View {
 
     private func inStockActions(item: InventoryItem) -> some View {
         VStack(spacing: AppSpacing.md) {
-            // Primary: Update quantity (checkout)
             if item.quantity > 0 {
                 Button(action: { onCheckOut?() }) {
                     Text("Update Quantity")
@@ -285,7 +319,6 @@ struct ScanResultView: View {
                     )
             }
 
-            // Secondary: View details
             Button(action: { onViewDetails?() }) {
                 Text("View Details")
                     .font(AppFonts.bodySemibold)
@@ -298,7 +331,6 @@ struct ScanResultView: View {
                     )
             }
 
-            // Tertiary: Scan another
             Button(action: onTryAgain) {
                 Text("Scan Another Item")
                     .font(AppFonts.captionSemibold)
@@ -340,6 +372,45 @@ struct ScanResultView: View {
                 Text("Cancel")
                     .font(AppFonts.captionSemibold)
                     .foregroundColor(AppColors.textSecondary)
+            }
+            .padding(.top, AppSpacing.xs)
+        }
+    }
+
+    private var unmatchedGTINActions: some View {
+        VStack(spacing: AppSpacing.md) {
+            // Primary: search catalog to link to an existing entry
+            Button(action: { onLinkToExisting?() }) {
+                Text("Search Catalog to Link")
+                    .font(AppFonts.bodySemibold)
+                    .foregroundColor(.white)
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 52)
+                    .background(
+                        RoundedRectangle(cornerRadius: AppRadius.medium)
+                            .fill(AppColors.accent)
+                    )
+            }
+
+            // Secondary: editor+ can create new inventory item
+            if canAddStock {
+                Button(action: { onAddToInventory?() }) {
+                    Text("Add as New Item")
+                        .font(AppFonts.bodySemibold)
+                        .foregroundColor(AppColors.textPrimary)
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 52)
+                        .background(
+                            RoundedRectangle(cornerRadius: AppRadius.medium)
+                                .stroke(AppColors.border, lineWidth: 1)
+                        )
+                }
+            }
+
+            Button(action: onTryAgain) {
+                Text("Scan Another Item")
+                    .font(AppFonts.captionSemibold)
+                    .foregroundColor(AppColors.accent)
             }
             .padding(.top, AppSpacing.xs)
         }
@@ -407,22 +478,21 @@ struct ScanResultView: View {
     .environmentObject(AuthManager.preview())
 }
 
-#Preview("Catalog Only") {
+#Preview("Unmatched GTIN") {
     ScanResultView(
-        result: .catalogOnly(
-            HCPCSCatalogItem(
-                hcpcsCode: "L1820",
-                clinicalName: "Knee orthosis, elastic with joints",
-                commonNames: ["knee brace"],
-                category: "Orthopedic",
-                gtins: [],
-                isActive: true,
-                sourceYear: 2026,
-                lastUpdated: Date()
-            ),
-            gtin: "012345678905"
+        result: .unmatchedGTIN(
+            gtin: "00810041986108",
+            parsed: ParsedBarcode(
+                raw: "(01)00810041986108(10)19139(241)SUP2071",
+                format: .gs1Display,
+                gtin: "00810041986108",
+                lotNumber: "19139",
+                productCode: "SUP2071",
+                hcpcsCode: nil
+            )
         ),
         onAddToInventory: {},
+        onLinkToExisting: {},
         onTryAgain: {},
         onDismiss: {}
     )

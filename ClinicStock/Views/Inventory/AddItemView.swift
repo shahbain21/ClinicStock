@@ -8,14 +8,14 @@
 //  mode — same form, pre-populated, saves via updateItemInfo instead of
 //  addNewItem.
 //
-//  HIFI RESTRUCTURE:
-//  - Big bottom Add/Cancel buttons instead of toolbar buttons to match
-//    the hifi's button styling (primary blue + red cancel).
-//  - The form layout itself stays — per decision, hifi is styling
-//    reference only; scope (all 11 fields) unchanged.
+//  NEW: Optional prefill init for the scan flow. When the Scan tab
+//  hands off to Add Item, it passes whatever values the scan gave us
+//  (barcode, lot, and if it matched a catalog entry: name, HCPCS,
+//  category). Users don't re-type what we already know.
 //
-//  Categories and sizes load from global settings docs. Free-text
-//  fallback keeps the form usable before seeding.
+//  HIFI STYLING:
+//  - Big bottom Add/Cancel buttons instead of toolbar buttons.
+//  - All current fields preserved (hifi is styling reference, not scope).
 //
 
 import SwiftUI
@@ -28,24 +28,51 @@ struct AddItemView: View {
 
     let editingItem: InventoryItem?
 
-    init(editingItem: InventoryItem? = nil) {
+    /// Init for adding a new item. All prefill params are optional —
+    /// typically filled from a scan result when the user taps
+    /// "Add to Inventory" on a catalog-only scan, or "Add as New Item"
+    /// on an unmatched-GTIN scan.
+    init(
+        prefillName: String? = nil,
+        prefillHCPCS: String? = nil,
+        prefillBarcode: String? = nil,
+        prefillCategory: String? = nil,
+        prefillLotNumber: String? = nil
+    ) {
+        self.editingItem = nil
+
+        _name = State(initialValue: prefillName ?? "")
+        _hcpcsCode = State(initialValue: prefillHCPCS ?? "")
+        _lotNumber = State(initialValue: prefillLotNumber ?? "")
+        _size = State(initialValue: "Universal")
+        _barcode = State(initialValue: prefillBarcode ?? "")
+        _quantity = State(initialValue: "0")
+        _threshold = State(initialValue: "10")
+        _category = State(initialValue: prefillCategory ?? "General Medical")
+        _manufacturer = State(initialValue: "")
+        _unitCost = State(initialValue: "")
+        _notes = State(initialValue: "")
+    }
+
+    /// Init for editing an existing item.
+    init(editingItem: InventoryItem) {
         self.editingItem = editingItem
 
-        _name = State(initialValue: editingItem?.name ?? "")
-        _hcpcsCode = State(initialValue: editingItem?.hcpcsCode ?? "")
-        _lotNumber = State(initialValue: editingItem?.lotNumber ?? "")
-        _size = State(initialValue: editingItem?.size ?? "Universal")
-        _barcode = State(initialValue: editingItem?.barcode ?? "")
-        _quantity = State(initialValue: "\(editingItem?.quantity ?? 0)")
-        _threshold = State(initialValue: "\(editingItem?.lowStockThreshold ?? 10)")
-        _category = State(initialValue: editingItem?.category ?? "General Medical")
-        _manufacturer = State(initialValue: editingItem?.manufacturer ?? "")
+        _name = State(initialValue: editingItem.name)
+        _hcpcsCode = State(initialValue: editingItem.hcpcsCode)
+        _lotNumber = State(initialValue: editingItem.lotNumber)
+        _size = State(initialValue: editingItem.size)
+        _barcode = State(initialValue: editingItem.barcode)
+        _quantity = State(initialValue: "\(editingItem.quantity)")
+        _threshold = State(initialValue: "\(editingItem.lowStockThreshold)")
+        _category = State(initialValue: editingItem.category)
+        _manufacturer = State(initialValue: editingItem.manufacturer)
         _unitCost = State(
-            initialValue: editingItem.flatMap {
-                $0.unitCost.map { String(format: "%.2f", $0) }
+            initialValue: editingItem.unitCost.map {
+                String(format: "%.2f", $0)
             } ?? ""
         )
-        _notes = State(initialValue: editingItem?.notes ?? "")
+        _notes = State(initialValue: editingItem.notes)
     }
 
     // Form fields
@@ -132,9 +159,8 @@ struct AddItemView: View {
                     }
 
                     Section("Additional") {
-                        // Labeled "Supplier" in the UI per hifi, but the
-                        // underlying field is still `manufacturer` on the
-                        // model (no schema churn).
+                        // Labeled "Supplier" per hifi but still maps to
+                        // the `manufacturer` field on the model.
                         TextField("Supplier", text: $manufacturer)
                         HStack {
                             Text("Unit cost")
@@ -146,8 +172,8 @@ struct AddItemView: View {
                                 .multilineTextAlignment(.trailing)
                                 .frame(width: 80)
                         }
-                        // Labeled "Description" — the Item Detail screen
-                        // displays this as the "Item Description" card.
+                        // Labeled "Description" — shown on Item Detail as
+                        // the "Item Description" card.
                         TextField(
                             "Description",
                             text: $notes,
@@ -169,7 +195,6 @@ struct AddItemView: View {
                     }
                 }
 
-                // ── Bottom button stack (hifi styling) ──
                 VStack(spacing: AppSpacing.sm) {
                     Button(action: submit) {
                         HStack {
@@ -228,6 +253,9 @@ struct AddItemView: View {
             categories = try await DatabaseService.shared.getCategories()
             sizes = try await DatabaseService.shared.getSizes()
 
+            // If the pre-filled value isn't in the loaded lists (e.g.
+            // category came from a catalog scan but admin removed it from
+            // settings), keep it in the picker anyway.
             if !categories.isEmpty && !categories.contains(category) {
                 categories.insert(category, at: 0)
             }
@@ -380,10 +408,22 @@ struct AddItemView: View {
 // MARK: - Preview
 // ══════════════════════════════════════════════════════
 
-#Preview("Add") {
+#Preview("Add Blank") {
     AddItemView()
         .environmentObject(AuthManager.preview())
         .environmentObject(InventoryManager())
+}
+
+#Preview("Add Prefilled (from scan)") {
+    AddItemView(
+        prefillName: "Knee Orthosis, elastic with joints",
+        prefillHCPCS: "L1820",
+        prefillBarcode: "00810041986108",
+        prefillCategory: "Orthopedic",
+        prefillLotNumber: "19139"
+    )
+    .environmentObject(AuthManager.preview())
+    .environmentObject(InventoryManager())
 }
 
 #Preview("Edit") {

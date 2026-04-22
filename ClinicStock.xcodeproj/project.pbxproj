@@ -21,7 +21,7 @@
 		817507912F8E883800825DB8 /* Exceptions for "ClinicStock" folder in "ClinicStock" target */ = {
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
-				Resources/Info.plist,
+				Info.plist,
 			);
 			target = 8175065F2F7AC69000825DB8 /* ClinicStock */;
 		};

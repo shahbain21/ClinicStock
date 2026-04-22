@@ -1,22 +1,14 @@
 //
-//  BarcodeScannerView.swift
-//  ClinicStock
-//
-//  Created by Mohamed Shahbain on 4/21/26.
-//
-
-
-//
 //  BarcodeScanner.swift
 //  ClinicStock
 //
 //  Native AVFoundation barcode scanner wrapped as a SwiftUI view.
-//  Extracted from CatalogSearchView so both the Catalog tab and the
-//  Scan tab can use the same scanner.
 //
-//  Supports common 1D formats (Code 128, EAN-13/8, UPC-E) and 2D
-//  formats (QR, DataMatrix, PDF417) — DataMatrix matters for medical
-//  device packaging, which increasingly uses GS1 DataMatrix for UDI.
+//  DEBUG LOGGING:
+//  - Metadata callback now prints the raw scanned string plus the
+//    detected type (EAN-13, Code 128, etc.) so we can diagnose when
+//    a GS1-128 barcode gets read as its EAN-13 fallback vs. with
+//    the full AI sequence. Only logged in DEBUG builds.
 //
 
 import SwiftUI
@@ -44,7 +36,7 @@ class ScannerViewController: UIViewController, AVCaptureMetadataOutputObjectsDel
     override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = .black
-        addOverlay()  // add first so cancel is always available
+        addOverlay()
         requestCameraAccessAndSetup()
     }
 
@@ -58,7 +50,6 @@ class ScannerViewController: UIViewController, AVCaptureMetadataOutputObjectsDel
 
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
-        // stopRunning blocks for a few hundred ms — keep it off main.
         DispatchQueue.global(qos: .userInitiated).async {
             self.captureSession?.stopRunning()
         }
@@ -216,6 +207,24 @@ class ScannerViewController: UIViewController, AVCaptureMetadataOutputObjectsDel
         else { return }
 
         hasScanned = true
+
+        #if DEBUG
+        // Log the raw captured value + type so we can diagnose when
+        // a GS1-128 barcode gets read as its EAN-13 fallback.
+        print("╔══════════════════════════════════════════════════════")
+        print("║ [BarcodeScanner] scan captured")
+        print("║   type:  \(object.type.rawValue)")
+        print("║   value: \(value)")
+        print("║   length: \(value.count) chars")
+        // Show the raw bytes in case FNC1 or other non-printable
+        // characters are present (they'd otherwise be invisible).
+        let hexBytes = value.unicodeScalars.map {
+            String(format: "%02X", $0.value)
+        }.joined(separator: " ")
+        print("║   bytes: \(hexBytes)")
+        print("╚══════════════════════════════════════════════════════")
+        #endif
+
         DispatchQueue.global(qos: .userInitiated).async {
             self.captureSession?.stopRunning()
         }

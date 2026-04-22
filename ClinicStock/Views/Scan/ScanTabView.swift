@@ -2,18 +2,15 @@
 //  ScanTabView.swift
 //  ClinicStock
 //
-//  The Scan tab. Fast-checkout surface for staff: scan an item, confirm
-//  the quantity, done. Different from the Catalog tab, which is a
-//  lookup reference.
+//  The Scan tab. Fast-checkout surface for staff.
 //
-//  Flow:
-//    1. Idle — big "Tap to scan" button. Also surfaces last action
-//       confirmation ("Checked out 2 · LSO Brace").
-//    2. Scanner — camera sheet. On successful read, kicks off lookup.
-//    3. Looking up — brief spinner while we check inventory + catalog.
-//    4. Result — ScanResultView with actions appropriate to the state.
-//    5. Checkout — stepper sheet (reused from ItemDetailView).
-//    6. Return to idle with confirmation toast, ready for next scan.
+//  NEW:
+//  - In-stock scans briefly show the result screen (1.5s) then auto-
+//    navigate to the full Item Detail page. The result screen was a
+//    confirmation-only step for in-stock matches — the detail page has
+//    every action the result screen offered plus more context.
+//  - The result screen still appears for the other cases (catalogOnly,
+//    unmatchedGTIN, notFound) where the user needs to choose an action.
 //
 
 import SwiftUI
@@ -24,21 +21,21 @@ struct ScanTabView: View {
     @EnvironmentObject var inventoryManager: InventoryManager
     @EnvironmentObject var searchService: HCPCSSearchService
 
-    // Scanner / lookup state
     @State private var showScanner = false
     @State private var isLookingUp = false
-    @State private var scanResult: ScanResult? = nil
+    @State private var scanResult: ScanOutcome? = nil
 
-    // Post-checkout confirmation toast
     @State private var toastMessage: String? = nil
     @State private var toastTask: Task<Void, Never>? = nil
 
-    // Checkout + add-to-inventory sheet state
-    @State private var itemForCheckout: InventoryItem? = nil
-    @State private var catalogForAdd: HCPCSCatalogItem? = nil
+    // Auto-advance task for in-stock scans → Item Detail.
+    @State private var autoAdvanceTask: Task<Void, Never>? = nil
 
-    // Navigation to full item detail
+    @State private var itemForCheckout: InventoryItem? = nil
     @State private var itemForDetail: InventoryItem? = nil
+
+    @State private var addItemPrefill: AddItemPrefill? = nil
+    @State private var gtinToLink: String? = nil
 
     var body: some View {
         NavigationStack {
@@ -53,11 +50,14 @@ struct ScanTabView: View {
                         onCheckOut: { handleCheckOut(result: result) },
                         onViewDetails: { handleViewDetails(result: result) },
                         onAddToInventory: { handleAddToInventory(result: result) },
+                        onLinkToExisting: { handleLinkToExisting(result: result) },
                         onTryAgain: {
+                            cancelAutoAdvance()
                             scanResult = nil
                             showScanner = true
                         },
                         onDismiss: {
+                            cancelAutoAdvance()
                             scanResult = nil
                         }
                     )
@@ -66,7 +66,6 @@ struct ScanTabView: View {
                     idleView
                 }
 
-                // Toast overlay
                 if let message = toastMessage {
                     VStack {
                         toastBanner(message: message)
@@ -100,13 +99,25 @@ struct ScanTabView: View {
                 .environmentObject(authManager)
                 .environmentObject(inventoryManager)
             }
-            .sheet(item: $catalogForAdd) { catalog in
-                // AddItemView doesn't currently accept a pre-populated
-                // catalog entry, so this just opens the blank form.
-                // Future: pass catalog to pre-fill name/HCPCS/category.
-                AddItemView()
-                    .environmentObject(authManager)
-                    .environmentObject(inventoryManager)
+            .sheet(item: $addItemPrefill) { prefill in
+                AddItemView(
+                    prefillName: prefill.name,
+                    prefillHCPCS: prefill.hcpcsCode,
+                    prefillBarcode: prefill.barcode,
+                    prefillCategory: prefill.category,
+                    prefillLotNumber: prefill.lotNumber
+                )
+                .environmentObject(authManager)
+                .environmentObject(inventoryManager)
+            }
+            .sheet(item: $gtinToLink.asIdentifiableString) { identifiable in
+                CatalogSearchView(
+                    initialPendingGTIN: identifiable.value,
+                    onLinkComplete: { linkedGTIN, catalogItem in
+                        handleLinkComplete(gtin: linkedGTIN, item: catalogItem)
+                    }
+                )
+                .environmentObject(searchService)
             }
             .navigationDestination(item: $itemForDetail) { item in
                 ItemDetailView(item: item)
@@ -190,62 +201,151 @@ struct ScanTabView: View {
 
     // ══════════════════════════════════════════════════════
     // MARK: - Lookup
-    //
-    // Order: inventory (clinic stock) first, catalog second. Inventory
-    // is the fast path — this tab is primarily about "I'm checking out
-    // something I have." Only fall through to catalog if nothing matches
-    // in stock.
     // ══════════════════════════════════════════════════════
 
     private func lookup(scannedValue: String) async {
-        guard let user = authManager.currentUser else { return }
+        guard let clinicID = authManager.currentUser?.clinicID else { return }
 
         isLookingUp = true
         defer { isLookingUp = false }
 
-        // 1. Try inventory first
+        #if DEBUG
+        print("[ScanTab] lookup starting — raw: \(scannedValue)")
+        #endif
+
         do {
             if let item = try await inventoryManager.lookupBarcode(
                 barcode: scannedValue,
-                by: user
+                clinicID: clinicID
             ) {
+                #if DEBUG
+                print("[ScanTab] matched inventory item: \(item.name)")
+                #endif
                 scanResult = .itemInStock(item)
+                scheduleAutoAdvance(to: item)
                 return
             }
         } catch {
-            print("Inventory barcode lookup error: \(error)")
-            // Fall through to catalog lookup
+            print("[ScanTab] inventory lookup error: \(error)")
         }
 
-        // 2. Try catalog — either we have this SKU as a reference but
-        //    not in stock, or it's completely unknown.
         let catalogResult = await searchService.lookupBarcode(scannedValue)
         switch catalogResult {
         case .found(let catalogItem, let gtin):
+            #if DEBUG
+            print("[ScanTab] matched catalog: \(catalogItem.hcpcsCode)")
+            #endif
             scanResult = .catalogOnly(catalogItem, gtin: gtin)
-        case .gtinNotFound, .unrecognized:
+
+        case .gtinNotFound(let gtin, let parsed):
+            #if DEBUG
+            print("[ScanTab] unmatched GTIN: \(gtin) (lot=\(parsed.lotNumber ?? "-"), productCode=\(parsed.productCode ?? "-"))")
+            #endif
+            scanResult = .unmatchedGTIN(gtin: gtin, parsed: parsed)
+
+        case .unrecognized:
+            #if DEBUG
+            print("[ScanTab] unrecognized — parser couldn't find GTIN or HCPCS")
+            #endif
             scanResult = .notFound(scannedValue: scannedValue)
         }
+    }
+
+    // ══════════════════════════════════════════════════════
+    // MARK: - Auto-advance for in-stock scans
+    //
+    // The result screen is redundant for in-stock matches since the
+    // Item Detail page has every action (check out, add stock, view
+    // history, edit) plus more context. We show the confirmation
+    // briefly for positive feedback, then push detail.
+    // ══════════════════════════════════════════════════════
+
+    private func scheduleAutoAdvance(to item: InventoryItem) {
+        autoAdvanceTask?.cancel()
+        autoAdvanceTask = Task {
+            try? await Task.sleep(nanoseconds: 1_500_000_000) // 1.5s
+            guard !Task.isCancelled else { return }
+
+            await MainActor.run {
+                // Only advance if the user hasn't interacted in the meantime.
+                // If they tapped "Scan Another", "View Details", or dismissed,
+                // scanResult will have already changed.
+                if case .itemInStock = scanResult {
+                    scanResult = nil
+                    itemForDetail = item
+                }
+            }
+        }
+    }
+
+    private func cancelAutoAdvance() {
+        autoAdvanceTask?.cancel()
+        autoAdvanceTask = nil
     }
 
     // ══════════════════════════════════════════════════════
     // MARK: - Result actions
     // ══════════════════════════════════════════════════════
 
-    private func handleCheckOut(result: ScanResult) {
+    private func handleCheckOut(result: ScanOutcome) {
         guard case .itemInStock(let item) = result else { return }
+        // User tapped the button — cancel auto-advance so we don't fire
+        // the detail navigation mid-checkout.
+        cancelAutoAdvance()
         itemForCheckout = item
     }
 
-    private func handleViewDetails(result: ScanResult) {
+    private func handleViewDetails(result: ScanOutcome) {
         guard case .itemInStock(let item) = result else { return }
+        cancelAutoAdvance()
         scanResult = nil
         itemForDetail = item
     }
 
-    private func handleAddToInventory(result: ScanResult) {
-        guard case .catalogOnly(let catalog, _) = result else { return }
-        catalogForAdd = catalog
+    private func handleAddToInventory(result: ScanOutcome) {
+        cancelAutoAdvance()
+        scanResult = nil
+
+        switch result {
+        case .catalogOnly(let catalog, let gtin):
+            addItemPrefill = AddItemPrefill(
+                name: catalog.displayName,
+                hcpcsCode: catalog.hcpcsCode,
+                barcode: gtin ?? "",
+                category: catalog.category,
+                lotNumber: nil
+            )
+
+        case .unmatchedGTIN(let gtin, let parsed):
+            addItemPrefill = AddItemPrefill(
+                name: nil,
+                hcpcsCode: nil,
+                barcode: gtin,
+                category: nil,
+                lotNumber: parsed.lotNumber
+            )
+
+        default:
+            addItemPrefill = AddItemPrefill(
+                name: nil,
+                hcpcsCode: nil,
+                barcode: nil,
+                category: nil,
+                lotNumber: nil
+            )
+        }
+    }
+
+    private func handleLinkToExisting(result: ScanOutcome) {
+        guard case .unmatchedGTIN(let gtin, _) = result else { return }
+        cancelAutoAdvance()
+        scanResult = nil
+        gtinToLink = gtin
+    }
+
+    private func handleLinkComplete(gtin: String, item: HCPCSCatalogItem) {
+        gtinToLink = nil
+        showToast("Linked \(gtin) → \(item.displayName)")
     }
 
     // ══════════════════════════════════════════════════════
@@ -263,12 +363,9 @@ struct ScanTabView: View {
                     amount: quantity,
                     by: user
                 )
-                // Success — return to idle state with a confirmation toast.
                 scanResult = nil
                 showToast("Checked out \(quantity) · \(item.name)")
             } catch {
-                // On error, leave the result screen up so the user can see
-                // what happened. Show error as a toast.
                 showToast("Error: \(error.localizedDescription)")
             }
         }
@@ -282,6 +379,41 @@ struct ScanTabView: View {
             guard !Task.isCancelled else { return }
             toastMessage = nil
         }
+    }
+}
+
+// ══════════════════════════════════════════════════════
+// MARK: - AddItem Prefill
+// ══════════════════════════════════════════════════════
+
+private struct AddItemPrefill: Identifiable {
+    let id = UUID()
+    let name: String?
+    let hcpcsCode: String?
+    let barcode: String?
+    let category: String?
+    let lotNumber: String?
+}
+
+// ══════════════════════════════════════════════════════
+// MARK: - Identifiable String binding helper
+// ══════════════════════════════════════════════════════
+
+private struct IdentifiableString: Identifiable {
+    var value: String
+    var id: String { value }
+}
+
+private extension Binding where Value == String? {
+    var asIdentifiableString: Binding<IdentifiableString?> {
+        Binding<IdentifiableString?>(
+            get: {
+                self.wrappedValue.map(IdentifiableString.init(value:))
+            },
+            set: { newValue in
+                self.wrappedValue = newValue?.value
+            }
+        )
     }
 }
 

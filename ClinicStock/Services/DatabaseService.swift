@@ -6,23 +6,9 @@
 //
 //  Refactored to use subcollections:
 //  inventory/{clinicID}/items/{itemID}
-//  historyLogs/{clinicID}/entries/{logID}
 //
-//  clinicID is kept on each document AND in the path. Redundant by
-//  design — easier debugging, no future bugs.
-//
-//  RECENT ADDITIONS:
-//  - getDeactivatedClinicUsers for the User Management "Show deactivated"
-//    toggle.
-//  - Invitation helpers: getInvitation, getPendingInvitations,
-//    saveInvitation, deleteInvitation.
-//
-//  PRIOR FIXES:
-//  - Listener callbacks surface errors so UI can distinguish connection
-//    loss from empty inventory.
-//  - addLog takes clinicID as a first-class parameter.
-//  - getLowStockItems flagged with TODO for server-side filtering.
-//  - getClinic defaults to active-only with includeInactive: opt-out.
+//  clinicID is kept on each document AND in the path.
+//  Redundant by design — easier debugging, no future bugs.
 //
 
 import Foundation
@@ -31,6 +17,7 @@ import FirebaseFirestore
 
 class DatabaseService {
 
+    // Singleton — one instance shared across the app
     static let shared = DatabaseService()
 
     private let db = Firestore.firestore()
@@ -44,12 +31,14 @@ class DatabaseService {
     // Path: inventory/{clinicID}/items/{itemID}
     // ══════════════════════════════════════════════════════
 
+    // Convenience — returns the items subcollection for a clinic
     private func itemsCollection(clinicID: String) -> CollectionReference {
         return db.collection("inventory")
             .document(clinicID)
             .collection("items")
     }
 
+    // ── Listen to inventory in real time ──
     func listenToInventory(
         clinicID: String,
         completion: @escaping ([InventoryItem], Error?) -> Void
@@ -78,6 +67,7 @@ class DatabaseService {
             }
     }
 
+    // ── Get a single item ──
     func getItem(itemID: String, clinicID: String) async throws -> InventoryItem? {
         let doc = try await itemsCollection(clinicID: clinicID)
             .document(itemID)
@@ -85,24 +75,51 @@ class DatabaseService {
         return try? doc.data(as: InventoryItem.self)
     }
 
-    func findByBarcode(barcode: String, clinicID: String) async throws -> InventoryItem? {
+    // ── Find item by barcode (tries multiple format variants) ──
+    //
+    // The caller passes a list of candidate strings — typically the raw
+    // scanned value plus a couple of normalized forms (14-digit GTIN,
+    // 13-digit stripped). Firestore's `in` operator matches any of them
+    // in a single query, which handles older items that were stored
+    // under a different format than what the scanner returns today.
+    //
+    // The legacy single-barcode call site is preserved as a convenience
+    // wrapper that forwards to this array version.
+    func findByBarcode(candidates: [String], clinicID: String) async throws -> InventoryItem? {
+        let uniqueCandidates = Array(Set(candidates.filter { !$0.isEmpty })).prefix(10)
+        guard !uniqueCandidates.isEmpty else { return nil }
+
         let snapshot = try await itemsCollection(clinicID: clinicID)
-            .whereField("barcode", isEqualTo: barcode)
+            .whereField("barcode", in: Array(uniqueCandidates))
             .limit(to: 1)
             .getDocuments()
 
         return try? snapshot.documents.first?.data(as: InventoryItem.self)
     }
 
-    func barcodeExists(barcode: String, clinicID: String) async throws -> Bool {
+    // Convenience overload for single-barcode callers.
+    func findByBarcode(barcode: String, clinicID: String) async throws -> InventoryItem? {
+        return try await findByBarcode(candidates: [barcode], clinicID: clinicID)
+    }
+
+    // ── Check if barcode already exists (tries multiple format variants) ──
+    func barcodeExists(candidates: [String], clinicID: String) async throws -> Bool {
+        let uniqueCandidates = Array(Set(candidates.filter { !$0.isEmpty })).prefix(10)
+        guard !uniqueCandidates.isEmpty else { return false }
+
         let snapshot = try await itemsCollection(clinicID: clinicID)
-            .whereField("barcode", isEqualTo: barcode)
+            .whereField("barcode", in: Array(uniqueCandidates))
             .limit(to: 1)
             .getDocuments()
 
         return !snapshot.documents.isEmpty
     }
 
+    func barcodeExists(barcode: String, clinicID: String) async throws -> Bool {
+        return try await barcodeExists(candidates: [barcode], clinicID: clinicID)
+    }
+
+    // ── Add a new item ──
     func addItem(_ item: [String: Any], clinicID: String) async throws -> String {
         let docRef = try await itemsCollection(clinicID: clinicID)
             .addDocument(data: item)
@@ -110,6 +127,7 @@ class DatabaseService {
         return docRef.documentID
     }
 
+    // ── Update an item ──
     func updateItem(itemID: String, clinicID: String, data: [String: Any]) async throws {
         var updateData = data
         updateData["lastUpdated"] = Timestamp(date: Date())
@@ -120,6 +138,7 @@ class DatabaseService {
         print("Updated item: \(itemID)")
     }
 
+    // ── Delete an item ──
     func deleteItem(itemID: String, clinicID: String) async throws {
         try await itemsCollection(clinicID: clinicID)
             .document(itemID)
@@ -127,10 +146,7 @@ class DatabaseService {
         print("Deleted item: \(itemID)")
     }
 
-    // TODO: Client-side filtering — fine for ~100 items per clinic, but
-    // at scale denormalize an `isLowStock: Bool` field updated on every
-    // quantity change so we can query .whereField("isLowStock", ...).
-    // Firestore can't compare two fields against each other in a query.
+    // ── Get low stock items for a clinic ──
     func getLowStockItems(clinicID: String) async throws -> [InventoryItem] {
         let snapshot = try await itemsCollection(clinicID: clinicID)
             .getDocuments()
@@ -146,6 +162,7 @@ class DatabaseService {
     // Global — shared across all clinics
     // ══════════════════════════════════════════════════════
 
+    // ── Get a single catalog item by HCPCS code ──
     func getCatalogItem(code: String) async throws -> HCPCSCatalogItem? {
         let doc = try await db.collection("hcpcsCatalog")
             .document(code.uppercased())
@@ -153,8 +170,7 @@ class DatabaseService {
         return try? doc.data(as: HCPCSCatalogItem.self)
     }
 
-    // Note: EXACT match via arrayContains. HCPCSSearchService does smarter
-    // substring matching client-side after loading the full catalog.
+    // ── Search catalog by common name ──
     func searchCatalog(query: String) async throws -> [HCPCSCatalogItem] {
         let snapshot = try await db.collection("hcpcsCatalog")
             .whereField("commonNames", arrayContains: query.lowercased())
@@ -166,6 +182,7 @@ class DatabaseService {
         }
     }
 
+    // ── Search catalog by category ──
     func getCatalogByCategory(category: String) async throws -> [HCPCSCatalogItem] {
         let snapshot = try await db.collection("hcpcsCatalog")
             .whereField("category", isEqualTo: category)
@@ -178,6 +195,7 @@ class DatabaseService {
         }
     }
 
+    // ── Search catalog by GTIN ──
     func getCatalogItemByGTIN(gtin: String) async throws -> HCPCSCatalogItem? {
         let snapshot = try await db.collection("hcpcsCatalog")
             .whereField("gtins", arrayContains: gtin)
@@ -186,28 +204,31 @@ class DatabaseService {
 
         return try? snapshot.documents.first?.data(as: HCPCSCatalogItem.self)
     }
-
+    
+    // ── Get ALL catalog items (used by HCPCSSearchService for local cache) ──
     func getAllCatalogItems() async throws -> [HCPCSCatalogItem] {
         let snapshot = try await db.collection("hcpcsCatalog")
-            .order(by: "hcpcsCode")
             .getDocuments()
         return snapshot.documents.compactMap {
             try? $0.data(as: HCPCSCatalogItem.self)
         }
     }
 
+    // ── Add GTIN to catalog item ──
     func addGTINToCatalog(code: String, gtin: String) async throws {
         try await db.collection("hcpcsCatalog")
             .document(code.uppercased())
             .updateData(["gtins": FieldValue.arrayUnion([gtin])])
     }
 
+    // ── Add common name to catalog item ──
     func addCommonNameToCatalog(code: String, name: String) async throws {
         try await db.collection("hcpcsCatalog")
             .document(code.uppercased())
             .updateData(["commonNames": FieldValue.arrayUnion([name.lowercased()])])
     }
 
+    // ── Save a new catalog item (from NLM fallback) ──
     func saveCatalogItem(_ item: [String: Any]) async throws {
         guard let code = item["hcpcsCode"] as? String else { return }
         try await db.collection("hcpcsCatalog")
@@ -218,26 +239,39 @@ class DatabaseService {
 
     // ══════════════════════════════════════════════════════
     // MARK: - HISTORY LOGS
-    // Path: historyLogs/{clinicID}/entries/{logID}
     // ══════════════════════════════════════════════════════
 
-    private func logsCollection(clinicID: String) -> CollectionReference {
-        return db.collection("historyLogs")
-            .document(clinicID)
-            .collection("entries")
+    // ── Write a new history log ──
+    //
+    // Accepts clinicID as a separate parameter so callers don't have to
+    // remember to bake it into the log dict. We inject it before write
+    // so every log document has a clinicID field (required by our
+    // listenToRecentLogs / getClinicLogs queries, which filter on it).
+    func addLog(_ log: [String: Any], clinicID: String) async throws {
+        var enrichedLog = log
+        enrichedLog["clinicID"] = clinicID
+        if enrichedLog["timestamp"] == nil {
+            enrichedLog["timestamp"] = Timestamp(date: Date())
+        }
+
+        let _ = try await db.collection("historyLogs")
+            .addDocument(data: enrichedLog)
+        print("Log added for clinic \(clinicID)")
     }
 
-    func addLog(_ log: [String: Any], clinicID: String) async throws {
-        var logData = log
-        logData["clinicID"] = clinicID
-
-        _ = try await logsCollection(clinicID: clinicID)
-            .addDocument(data: logData)
-        print("Log added to clinic \(clinicID)")
+    // Convenience overload for logs that already have clinicID baked in.
+    // Prefer the explicit form above for new call sites.
+    func addLog(_ log: [String: Any]) async throws {
+        guard let clinicID = log["clinicID"] as? String else {
+            print("addLog called without clinicID — log dropped")
+            return
+        }
+        try await addLog(log, clinicID: clinicID)
     }
 
     func getClinicLogs(clinicID: String, limit: Int = 50) async throws -> [HistoryLog] {
-        let snapshot = try await logsCollection(clinicID: clinicID)
+        let snapshot = try await db.collection("historyLogs")
+            .whereField("clinicID", isEqualTo: clinicID)
             .order(by: "timestamp", descending: true)
             .limit(to: limit)
             .getDocuments()
@@ -247,9 +281,14 @@ class DatabaseService {
         }
     }
 
-    func getItemLogs(itemID: String, clinicID: String, limit: Int = 20) async throws -> [HistoryLog] {
-        let snapshot = try await logsCollection(clinicID: clinicID)
+    func getItemLogs(
+        itemID: String,
+        clinicID: String,
+        limit: Int = 20
+    ) async throws -> [HistoryLog] {
+        let snapshot = try await db.collection("historyLogs")
             .whereField("itemID", isEqualTo: itemID)
+            .whereField("clinicID", isEqualTo: clinicID)
             .order(by: "timestamp", descending: true)
             .limit(to: limit)
             .getDocuments()
@@ -265,7 +304,8 @@ class DatabaseService {
         completion: @escaping ([HistoryLog], Error?) -> Void
     ) -> ListenerRegistration {
 
-        return logsCollection(clinicID: clinicID)
+        return db.collection("historyLogs")
+            .whereField("clinicID", isEqualTo: clinicID)
             .order(by: "timestamp", descending: true)
             .limit(to: limit)
             .addSnapshotListener { snapshot, error in
@@ -279,7 +319,6 @@ class DatabaseService {
                     completion([], nil)
                     return
                 }
-
                 let logs = documents.compactMap {
                     try? $0.data(as: HistoryLog.self)
                 }
@@ -336,16 +375,33 @@ class DatabaseService {
 
     // ══════════════════════════════════════════════════════
     // MARK: - INVITATIONS
-    // Path: invitations/{email}
+    // Path: invitations/{normalized-email}
     //
-    // Note: invitation doc IDs are emails (normalized lowercase), which
-    // means one email can only hold one invitation globally. Known
-    // limitation — see UserManager for comment.
+    // Keyed by email (lowercased, trimmed) because:
+    //  1. A single pending invitation per email prevents accidental
+    //     duplicates when re-inviting.
+    //  2. checkAndAcceptInvitation on sign-in needs to look up by email
+    //     (the only thing we know about a user at auth time).
+    //
+    // Firestore document IDs can't contain '.', '#', '$', '[', or ']'
+    // — but email addresses regularly contain '.'. We percent-encode
+    // the dot when deriving the document ID. Reads/writes go through
+    // a helper so callers use plain emails.
     // ══════════════════════════════════════════════════════
 
+    private func invitationDocID(for email: String) -> String {
+        let normalized = email
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        // Only the dot is problematic in practice for valid emails.
+        // Use %2E so the encoding is stable and round-trippable.
+        return normalized.replacingOccurrences(of: ".", with: "%2E")
+    }
+
     func getInvitation(email: String) async throws -> Invitation? {
+        let docID = invitationDocID(for: email)
         let doc = try await db.collection("invitations")
-            .document(email)
+            .document(docID)
             .getDocument()
         return try? doc.data(as: Invitation.self)
     }
@@ -362,17 +418,50 @@ class DatabaseService {
     }
 
     func saveInvitation(_ data: [String: Any], email: String) async throws {
+        var enriched = data
+        let normalized = email
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+
+        // Always set the email field in the stored doc to the normalized
+        // form, regardless of what the caller put in the dict. This keeps
+        // queries that filter by email reliable.
+        enriched["email"] = normalized
+        if enriched["dateCreated"] == nil {
+            enriched["dateCreated"] = Timestamp(date: Date())
+        }
+
+        let docID = invitationDocID(for: normalized)
         try await db.collection("invitations")
-            .document(email)
-            .setData(data)
-        print("Invitation saved: \(email)")
+            .document(docID)
+            .setData(enriched, merge: true)
+        print("Invitation saved: \(normalized)")
+    }
+
+    // Convenience overload for callers that have email inside the dict.
+    // Prefer the explicit form above.
+    func saveInvitation(_ data: [String: Any]) async throws {
+        guard let email = data["email"] as? String else {
+            print("saveInvitation called without email — dropped")
+            return
+        }
+        try await saveInvitation(data, email: email)
     }
 
     func deleteInvitation(email: String) async throws {
+        let docID = invitationDocID(for: email)
         try await db.collection("invitations")
-            .document(email)
+            .document(docID)
             .delete()
         print("Invitation deleted: \(email)")
+    }
+
+    func updateInvitation(email: String, data: [String: Any]) async throws {
+        let docID = invitationDocID(for: email)
+        try await db.collection("invitations")
+            .document(docID)
+            .updateData(data)
+        print("Invitation updated: \(email)")
     }
 
     // ══════════════════════════════════════════════════════
@@ -390,20 +479,11 @@ class DatabaseService {
         }
     }
 
-    func getClinic(
-        clinicID: String,
-        includeInactive: Bool = false
-    ) async throws -> Clinic? {
+    func getClinic(clinicID: String) async throws -> Clinic? {
         let doc = try await db.collection("clinics")
             .document(clinicID)
             .getDocument()
-
-        guard let clinic = try? doc.data(as: Clinic.self) else { return nil }
-
-        if !includeInactive && !clinic.isActive {
-            return nil
-        }
-        return clinic
+        return try? doc.data(as: Clinic.self)
     }
 
     // ══════════════════════════════════════════════════════

@@ -6,13 +6,24 @@
 //  for "what is this thing?" — the fast checkout flow lives in the
 //  Scan tab (ScanTabView) instead.
 //
-//  First workflow: type a name to find an item. Second: scan a barcode
-//  that resolves to a catalog entry. Third: scan a barcode NOT in the
-//  catalog yet, then search by name and tap a result to link the
-//  scanned GTIN to that HCPCS code (self-improving catalog).
+//  Three workflows:
 //
-//  The BarcodeScannerView and ScannerViewController classes now live in
-//  BarcodeScanner.swift so both this view and ScanTabView can share them.
+//    1. Type a name to find an item.
+//    2. Scan a barcode that resolves to a catalog entry.
+//    3. Scan a barcode NOT in the catalog yet, then search by name and
+//       tap a result to link the scanned GTIN to that HCPCS code
+//       (self-improving catalog).
+//
+//  NEW INIT PARAM:
+//  - initialPendingGTIN: when presented as a sheet from ScanTabView,
+//    this pre-loads the "linking" state so tapping any search result
+//    auto-links the scanned GTIN.
+//
+//  NEW CALLBACK:
+//  - onLinkComplete: fires after a successful link. The parent sheet
+//    uses this to dismiss and show a confirmation on the Scan tab.
+//
+//  BarcodeScannerView / ScannerViewController live in BarcodeScanner.swift.
 //
 
 import SwiftUI
@@ -20,6 +31,16 @@ import SwiftUI
 struct CatalogSearchView: View {
 
     @EnvironmentObject var searchService: HCPCSSearchService
+    @Environment(\.dismiss) private var dismiss
+
+    // If non-nil at init, pre-loads "linking mode" for the flow where
+    // Scan tab couldn't find a GTIN in the catalog and sent the user
+    // here to link it to an existing entry.
+    let initialPendingGTIN: String?
+
+    // Fires after a successful link. Lets the parent dismiss + show a
+    // confirmation. Nil means standalone use (no callback).
+    var onLinkComplete: ((String, HCPCSCatalogItem) -> Void)? = nil
 
     @State private var searchText = ""
     @State private var showScanner = false
@@ -33,16 +54,27 @@ struct CatalogSearchView: View {
     // Unrecognized-barcode feedback
     @State private var showUnrecognizedAlert = false
 
+    init(
+        initialPendingGTIN: String? = nil,
+        onLinkComplete: ((String, HCPCSCatalogItem) -> Void)? = nil
+    ) {
+        self.initialPendingGTIN = initialPendingGTIN
+        self.onLinkComplete = onLinkComplete
+    }
+
+    // True when this view was presented as a sheet (usually from Scan),
+    // so we want a Done/Close button in the nav bar.
+    private var isPresentedModally: Bool {
+        initialPendingGTIN != nil || onLinkComplete != nil
+    }
+
     var body: some View {
         NavigationStack {
             VStack(spacing: 0) {
-
-                // ── Pending GTIN banner ──
                 if let gtin = pendingGTIN {
                     pendingGTINBanner(gtin: gtin)
                 }
 
-                // ── Search bar + scan button ──
                 HStack(spacing: 12) {
                     HStack {
                         Image(systemName: "magnifyingglass")
@@ -82,7 +114,6 @@ struct CatalogSearchView: View {
                 }
                 .padding()
 
-                // ── Loading indicator ──
                 if !searchService.isLoaded {
                     HStack(spacing: 8) {
                         ProgressView()
@@ -95,13 +126,17 @@ struct CatalogSearchView: View {
                     .padding(.bottom, 8)
                 }
 
-                // ── Results ──
                 resultsContent
             }
             .navigationTitle("DME Catalog")
             .navigationBarTitleDisplayMode(.large)
-
-            // ── Barcode scanner ──
+            .toolbar {
+                if isPresentedModally {
+                    ToolbarItem(placement: .topBarTrailing) {
+                        Button("Done") { dismiss() }
+                    }
+                }
+            }
             .sheet(isPresented: $showScanner) {
                 BarcodeScannerView { scannedValue in
                     showScanner = false
@@ -110,8 +145,6 @@ struct CatalogSearchView: View {
                     }
                 }
             }
-
-            // ── GTIN confirmation alert ──
             .alert("Item Not Recognized", isPresented: $showGTINConfirmation) {
                 Button("Search for it") {
                     searchText = ""
@@ -123,17 +156,19 @@ struct CatalogSearchView: View {
             } message: {
                 Text("This barcode isn't in the catalog yet. Search for the item by name and tap it to link this barcode automatically.")
             }
-
-            // ── Unrecognized barcode alert ──
             .alert("Barcode Not Recognized", isPresented: $showUnrecognizedAlert) {
                 Button("OK", role: .cancel) {}
             } message: {
                 Text("The scanned code isn't a valid HCPCS or product barcode. Try again or search by name.")
             }
-
-            // ── Item detail ──
             .sheet(item: $selectedItem) { item in
                 CatalogItemDetailView(item: item)
+            }
+            .onAppear {
+                // Pre-load linking state if opened from Scan tab
+                if let initial = initialPendingGTIN, pendingGTIN == nil {
+                    pendingGTIN = initial
+                }
             }
         }
     }
@@ -206,6 +241,10 @@ struct CatalogSearchView: View {
 
             Button("Cancel") {
                 pendingGTIN = nil
+                // If we were opened solely for linking, also dismiss the sheet
+                if initialPendingGTIN != nil {
+                    dismiss()
+                }
             }
             .font(.footnote.weight(.semibold))
             .foregroundColor(.orange)
@@ -236,13 +275,28 @@ struct CatalogSearchView: View {
     // ══════════════════════════════════════════════════════
 
     private func selectResult(_ item: HCPCSCatalogItem) {
+        // If we have a pending GTIN, do the link and bubble up. Otherwise
+        // just open the item detail as usual.
         if let gtin = pendingGTIN {
             Task {
                 await searchService.confirmAndSaveGTIN(gtin: gtin, forItem: item)
+
                 pendingGTIN = nil
+
+                // Tell the parent we linked — they decide what to do next
+                // (typically: dismiss + show a confirmation toast).
+                if let callback = onLinkComplete {
+                    callback(gtin, item)
+                    dismiss()
+                } else {
+                    // No callback — still show the item detail so the
+                    // user sees what they linked.
+                    selectedItem = item
+                }
             }
+        } else {
+            selectedItem = item
         }
-        selectedItem = item
     }
 
     private func handleScan(value: String) async {
@@ -360,7 +414,15 @@ struct CatalogItemDetailView: View {
 // MARK: - Preview
 // ══════════════════════════════════════════════════════
 
-#Preview {
+#Preview("Browse") {
     CatalogSearchView()
         .environmentObject(HCPCSSearchService())
+}
+
+#Preview("Linking Mode") {
+    CatalogSearchView(
+        initialPendingGTIN: "00810041986108",
+        onLinkComplete: { _, _ in }
+    )
+    .environmentObject(HCPCSSearchService())
 }
