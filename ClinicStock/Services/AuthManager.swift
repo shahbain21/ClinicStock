@@ -4,18 +4,26 @@
 //
 //  Created by Mohamed Shahbain on 4/3/26.
 //
-//  UPDATED:
-//  - Added Google Sign-In
-//  - Added Apple Sign-In
-//  - Remember Me loads saved email
-//  - Shared sign-in completion handler for all providers
+//  FIXES (this pass):
+//  - joinClinic(email:password:) added. Centralizes the invitation
+//    acceptance flow (was previously duplicated inside JoinClinicView).
+//    Creates the Auth account, lets the auth listener check for an
+//    invitation and provision the profile, rolls back the Auth account
+//    if no invitation is found.
+//  - clearError() helper so views don't need to mutate errorMessage.
 //
-//  FIXES:
-//  - Preview-safe init: pass skipListener: true to avoid Firebase in #Preview
-//  - AuthManager.preview() factory for SwiftUI previews
-//  - Fixed nonce charset typo (missing 'W')
-//  - signOut() now resets isLoading for consistent UI state
-//  - Removed unused parameters from handleSocialSignIn
+//  EARLIER FIXES (carried forward):
+//  - Registration writes are transactional with Auth rollback on failure.
+//  - Settings seeded only if missing (no cross-clinic stomping).
+//  - Auth listener is the single source of truth; sign-in methods don't
+//    manually call loadUserProfile.
+//  - Email normalized (trimmed + lowercased) at every entry point.
+//  - currentNonce cleared after use.
+//  - Remembered-email persistence via manager methods, not magic strings.
+//  - Defensive input validation in registerClinic.
+//  - @MainActor on the class.
+//  - Preview-safe init.
+//  - Nonce charset includes 'W' (was missing).
 //
 
 import Foundation
@@ -27,6 +35,7 @@ import GoogleSignInSwift
 import AuthenticationServices
 import CryptoKit
 
+@MainActor
 class AuthManager: ObservableObject {
 
     @Published var isAuthenticated = false
@@ -38,21 +47,19 @@ class AuthManager: ObservableObject {
     private let db = Firestore.firestore()
     private var authListener: AuthStateDidChangeListenerHandle?
 
-    // Apple Sign-In requires a nonce for security
+    // Apple Sign-In requires a nonce. Nil when no Apple sign-in is in flight.
     private var currentNonce: String?
+
+    private static let savedEmailKey = "savedEmail"
 
     // ══════════════════════════════════════════════════════
     // MARK: - Init
-    //
-    // Pass skipListener: true from SwiftUI #Preview blocks to prevent
-    // AuthManager from touching Firebase (which isn't configured in previews).
     // ══════════════════════════════════════════════════════
 
     init(skipListener: Bool = false) {
         if !skipListener {
             listenForAuthChanges()
         } else {
-            // Previews don't have Firebase — don't pretend we're loading.
             isLoading = false
         }
     }
@@ -65,6 +72,10 @@ class AuthManager: ObservableObject {
 
     // ══════════════════════════════════════════════════════
     // MARK: - Auth State Listener
+    //
+    // Single source of truth for profile loading. Sign-in methods only
+    // call the Firebase API — the listener fires, profile gets loaded,
+    // @Published state updates.
     // ══════════════════════════════════════════════════════
 
     private func listenForAuthChanges() {
@@ -75,12 +86,12 @@ class AuthManager: ObservableObject {
 
             if let firebaseUser = firebaseUser {
                 print("User detected: \(firebaseUser.uid)")
-                Task {
+                Task { @MainActor in
                     await self.loadUserProfile(uid: firebaseUser.uid)
                 }
             } else {
                 print("No user logged in")
-                DispatchQueue.main.async {
+                Task { @MainActor in
                     self.currentUser = nil
                     self.currentClinic = nil
                     self.isAuthenticated = false
@@ -91,12 +102,23 @@ class AuthManager: ObservableObject {
     }
 
     // ══════════════════════════════════════════════════════
+    // MARK: - Clear error (for views)
+    // ══════════════════════════════════════════════════════
+
+    func clearError() {
+        errorMessage = nil
+    }
+
+    // ══════════════════════════════════════════════════════
     // MARK: - Email / Password Sign In
     // ══════════════════════════════════════════════════════
 
     func signIn(email: String, password: String) async throws {
+        errorMessage = nil
+        let normalizedEmail = Self.normalizeEmail(email)
+
         let result = try await Auth.auth().signIn(
-            withEmail: email,
+            withEmail: normalizedEmail,
             password: password
         )
         print("Signed in: \(result.user.uid)")
@@ -105,7 +127,7 @@ class AuthManager: ObservableObject {
             .document(result.user.uid)
             .updateData(["lastLogin": Timestamp(date: Date())])
 
-        await loadUserProfile(uid: result.user.uid)
+        // Auth listener handles profile loading.
     }
 
     // ══════════════════════════════════════════════════════
@@ -113,7 +135,8 @@ class AuthManager: ObservableObject {
     // ══════════════════════════════════════════════════════
 
     func signInWithGoogle() async throws {
-        // Get the root view controller
+        errorMessage = nil
+
         let rootVC: UIViewController = try await MainActor.run {
             guard let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
                   let rootVC = windowScene.windows.first?.rootViewController
@@ -123,35 +146,32 @@ class AuthManager: ObservableObject {
             return rootVC
         }
 
-        // Start Google Sign-In flow
         let result: GIDSignInResult = try await GIDSignIn.sharedInstance.signIn(
             withPresenting: rootVC
         )
 
-        // Get tokens
         guard let idToken = result.user.idToken?.tokenString else {
             throw AuthError.missingToken
         }
         let accessToken = result.user.accessToken.tokenString
 
-        // Create Firebase credential
         let credential = GoogleAuthProvider.credential(
             withIDToken: idToken,
             accessToken: accessToken
         )
 
-        // Sign in to Firebase
         let authResult = try await Auth.auth().signIn(with: credential)
         print("Google sign-in: \(authResult.user.uid)")
 
-        await handleSocialSignIn(uid: authResult.user.uid)
+        try? await db.collection("users")
+            .document(authResult.user.uid)
+            .updateData(["lastLogin": Timestamp(date: Date())])
     }
 
     // ══════════════════════════════════════════════════════
     // MARK: - Apple Sign In
     // ══════════════════════════════════════════════════════
 
-    // Step 1: Generate nonce and create the Apple request
     func createAppleSignInRequest() -> ASAuthorizationAppleIDRequest {
         let nonce = randomNonceString()
         currentNonce = nonce
@@ -163,30 +183,35 @@ class AuthManager: ObservableObject {
         return request
     }
 
-    // Step 2: Handle the Apple Sign-In result
     func handleAppleSignIn(result: Result<ASAuthorization, Error>) async throws {
+        errorMessage = nil
+
+        // Grab and clear the nonce up front so it can never be reused.
+        let nonce = currentNonce
+        currentNonce = nil
+
         switch result {
         case .success(let authorization):
             guard let appleIDCredential = authorization.credential as? ASAuthorizationAppleIDCredential,
-                  let nonce = currentNonce,
+                  let nonce = nonce,
                   let appleIDToken = appleIDCredential.identityToken,
                   let idTokenString = String(data: appleIDToken, encoding: .utf8)
             else {
                 throw AuthError.missingToken
             }
 
-            // Create Firebase credential
             let credential = OAuthProvider.appleCredential(
                 withIDToken: idTokenString,
                 rawNonce: nonce,
                 fullName: appleIDCredential.fullName
             )
 
-            // Sign in to Firebase
             let authResult = try await Auth.auth().signIn(with: credential)
             print("Apple sign-in: \(authResult.user.uid)")
 
-            await handleSocialSignIn(uid: authResult.user.uid)
+            try? await db.collection("users")
+                .document(authResult.user.uid)
+                .updateData(["lastLogin": Timestamp(date: Date())])
 
         case .failure(let error):
             // User cancelled — don't show error
@@ -198,8 +223,58 @@ class AuthManager: ObservableObject {
     }
 
     // ══════════════════════════════════════════════════════
+    // MARK: - Join Clinic (invited user, email/password path)
+    //
+    // Creates a Firebase Auth account for an invited user, then lets the
+    // auth listener check for the invitation and provision the profile.
+    // If no invitation is found for the email, the Auth account is
+    // deleted so the user can retry (e.g., after asking their admin to
+    // invite them).
+    // ══════════════════════════════════════════════════════
+
+    func joinClinic(email: String, password: String) async throws {
+        errorMessage = nil
+        let normalizedEmail = Self.normalizeEmail(email)
+
+        guard !normalizedEmail.isEmpty, normalizedEmail.contains("@") else {
+            throw AuthError.invalidJoinInput
+        }
+
+        // Create the Auth account
+        let result = try await Auth.auth().createUser(
+            withEmail: normalizedEmail,
+            password: password
+        )
+        let uid = result.user.uid
+        print("Join: auth account created \(uid)")
+
+        // Check for an invitation
+        let accepted = await UserManager.checkAndAcceptInvitation(
+            uid: uid,
+            email: normalizedEmail,
+            displayName: "User"
+        )
+
+        if accepted {
+            print("Join: invitation accepted, listener will pick up profile")
+            // The auth listener will reload the profile and flip
+            // isAuthenticated. The view just needs to dismiss.
+            return
+        }
+
+        // No invitation — roll back the Auth account so the user can
+        // retry with the same email after being invited.
+        print("Join: no invitation found, rolling back auth account")
+        try? await result.user.delete()
+        try? Auth.auth().signOut()
+
+        throw AuthError.noInvitation
+    }
+
+    // ══════════════════════════════════════════════════════
     // MARK: - Load User Profile
-    // Now checks for invitations if profile doesn't exist
+    //
+    // Called ONLY by the auth state listener.
     // ══════════════════════════════════════════════════════
 
     private func loadUserProfile(uid: String) async {
@@ -208,17 +283,14 @@ class AuthManager: ObservableObject {
                 .document(uid)
                 .getDocument()
 
-            // Profile exists — load it
             if let user = try? userDoc.data(as: AppUser.self) {
 
                 guard user.isActive else {
                     print("User is deactivated")
                     try? Auth.auth().signOut()
-                    await MainActor.run {
-                        self.isAuthenticated = false
-                        self.isLoading = false
-                        self.errorMessage = "Your account has been deactivated."
-                    }
+                    self.isAuthenticated = false
+                    self.isLoading = false
+                    self.errorMessage = "Your account has been deactivated."
                     return
                 }
 
@@ -227,23 +299,21 @@ class AuthManager: ObservableObject {
                     .getDocument()
                 let clinic = try? clinicDoc.data(as: Clinic.self)
 
-                await MainActor.run {
-                    self.currentUser = user
-                    self.currentClinic = clinic
-                    self.isAuthenticated = true
-                    self.isLoading = false
-                    self.errorMessage = nil
+                self.currentUser = user
+                self.currentClinic = clinic
+                self.isAuthenticated = true
+                self.isLoading = false
+                self.errorMessage = nil
 
-                    print("Profile loaded:")
-                    print("   Name: \(user.displayName)")
-                    print("   Role: \(user.role.rawValue)")
-                    print("   Clinic: \(clinic?.name ?? "Unknown")")
-                }
+                print("Profile loaded:")
+                print("   Name: \(user.displayName)")
+                print("   Role: \(user.role.rawValue)")
+                print("   Clinic: \(clinic?.name ?? "Unknown")")
                 return
             }
 
             // Profile doesn't exist — check for invitation
-            let email = Auth.auth().currentUser?.email ?? ""
+            let email = Self.normalizeEmail(Auth.auth().currentUser?.email ?? "")
             print("No profile found. Checking invitation for: \(email)")
 
             let accepted = await UserManager.checkAndAcceptInvitation(
@@ -254,50 +324,25 @@ class AuthManager: ObservableObject {
 
             if accepted {
                 print("Invitation accepted — loading profile")
-                // Profile was just created from invitation — load it
                 await loadUserProfile(uid: uid)
                 return
             }
 
-            // No profile AND no invitation
             print("No profile or invitation found")
             try? Auth.auth().signOut()
-            await MainActor.run {
-                self.isAuthenticated = false
-                self.isLoading = false
-                self.errorMessage = "No account found. Ask your clinic admin to invite you."
-            }
+            self.isAuthenticated = false
+            self.isLoading = false
+            self.errorMessage = "No account found. Ask your clinic admin to invite you."
 
         } catch {
             print("Error loading profile: \(error)")
-            await MainActor.run {
-                self.isLoading = false
-                self.errorMessage = error.localizedDescription
-            }
+            self.isLoading = false
+            self.errorMessage = error.localizedDescription
         }
     }
 
     // ══════════════════════════════════════════════════════
-    // MARK: - Shared Social Sign-In Handler
-    // Simplified — just loads profile (which checks invitations)
-    // ══════════════════════════════════════════════════════
-
-    private func handleSocialSignIn(uid: String) async {
-        // Update last login if user exists (no-op if doc doesn't exist yet)
-        try? await db.collection("users")
-            .document(uid)
-            .updateData(["lastLogin": Timestamp(date: Date())])
-
-        // loadUserProfile handles everything:
-        // - Existing profile → sign in
-        // - No profile but invitation exists → accept invitation → sign in
-        // - No profile and no invitation → reject
-        await loadUserProfile(uid: uid)
-    }
-
-    // ══════════════════════════════════════════════════════
     // MARK: - Register New Clinic
-    // Creates Auth account + Clinic + Admin user profile
     // ══════════════════════════════════════════════════════
 
     func registerClinic(
@@ -308,71 +353,105 @@ class AuthManager: ObservableObject {
         email: String,
         password: String
     ) async throws {
+        errorMessage = nil
 
-        // 1. Create Firebase Auth account
+        let trimmedFirst = firstName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedLast = lastName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedOrg = organizationName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedLocation = location.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedEmail = Self.normalizeEmail(email)
+
+        guard !trimmedFirst.isEmpty,
+              !trimmedLast.isEmpty,
+              !trimmedOrg.isEmpty,
+              !trimmedLocation.isEmpty,
+              !normalizedEmail.isEmpty else {
+            throw AuthError.invalidRegistrationInput
+        }
+
         let result = try await Auth.auth().createUser(
-            withEmail: email,
+            withEmail: normalizedEmail,
             password: password
         )
-
         let uid = result.user.uid
         print("Auth account created: \(uid)")
 
-        // 2. Create the clinic
-        let clinicRef = db.collection("clinics").document()
-        let clinicID = clinicRef.documentID
+        do {
+            let clinicRef = db.collection("clinics").document()
+            let clinicID = clinicRef.documentID
+            let userRef = db.collection("users").document(uid)
 
-        try await clinicRef.setData([
-            "name": organizationName,
-            "address": location,
-            "city": "",
-            "state": "",
-            "zip": "",
-            "phone": "",
-            "email": email,
-            "managerID": uid,
-            "isActive": true,
-            "dateCreated": Timestamp(date: Date())
-        ])
+            let batch = db.batch()
 
-        print("Clinic created: \(clinicID)")
+            batch.setData([
+                "name": trimmedOrg,
+                "address": trimmedLocation,
+                "city": "",
+                "state": "",
+                "zip": "",
+                "phone": "",
+                "email": normalizedEmail,
+                "managerID": uid,
+                "isActive": true,
+                "dateCreated": Timestamp(date: Date())
+            ], forDocument: clinicRef)
 
-        // 3. Create the admin user profile
-        try await db.collection("users").document(uid).setData([
-            "email": email,
-            "displayName": "\(firstName) \(lastName)",
-            "role": "admin",
-            "clinicID": clinicID,
-            "phone": "",
-            "isActive": true,
-            "lastLogin": Timestamp(date: Date()),
-            "dateCreated": Timestamp(date: Date())
-        ])
+            batch.setData([
+                "email": normalizedEmail,
+                "displayName": "\(trimmedFirst) \(trimmedLast)",
+                "role": "admin",
+                "clinicID": clinicID,
+                "phone": "",
+                "isActive": true,
+                "lastLogin": Timestamp(date: Date()),
+                "dateCreated": Timestamp(date: Date())
+            ], forDocument: userRef)
 
-        print("Admin profile created")
+            try await batch.commit()
+            print("Clinic and admin profile committed: \(clinicID)")
 
-        // 4. Create default settings for the clinic
-        try? await db.collection("settings").document("categories").setData([
-            "list": [
-                "Orthopedic", "Cervical", "Lumbar",
-                "Wound Care", "Respiratory", "Diabetic Supplies",
-                "Compression", "Mobility Aids",
-                "Electrical Stimulation", "General Medical"
-            ]
-        ], merge: true)
+            await seedDefaultSettingsIfMissing()
 
-        try? await db.collection("settings").document("sizes").setData([
-            "list": [
-                "XS", "S", "M", "L", "XL", "XXL",
-                "Universal", "Pediatric", "Custom",
-                "N/A", "RT", "LT"
-            ]
-        ], merge: true)
-
-        // 5. Load the profile — this triggers isAuthenticated = true
-        await loadUserProfile(uid: uid)
+        } catch {
+            print("Registration failed, rolling back Auth account: \(error)")
+            try? await result.user.delete()
+            try? Auth.auth().signOut()
+            throw error
+        }
 
         print("Registration complete!")
+    }
+
+    private func seedDefaultSettingsIfMissing() async {
+        let categoriesRef = db.collection("settings").document("categories")
+        let sizesRef = db.collection("settings").document("sizes")
+
+        do {
+            let catDoc = try await categoriesRef.getDocument()
+            if !catDoc.exists {
+                try? await categoriesRef.setData([
+                    "list": [
+                        "Orthopedic", "Cervical", "Lumbar",
+                        "Wound Care", "Respiratory", "Diabetic Supplies",
+                        "Compression", "Mobility Aids",
+                        "Electrical Stimulation", "General Medical"
+                    ]
+                ])
+            }
+
+            let sizesDoc = try await sizesRef.getDocument()
+            if !sizesDoc.exists {
+                try? await sizesRef.setData([
+                    "list": [
+                        "XS", "S", "M", "L", "XL", "XXL",
+                        "Universal", "Pediatric", "Custom",
+                        "N/A", "RT", "LT"
+                    ]
+                ])
+            }
+        } catch {
+            print("Default settings seed check failed: \(error)")
+        }
     }
 
     // ══════════════════════════════════════════════════════
@@ -382,7 +461,7 @@ class AuthManager: ObservableObject {
     func signOut() {
         do {
             try Auth.auth().signOut()
-            GIDSignIn.sharedInstance.signOut()  // Also sign out of Google
+            GIDSignIn.sharedInstance.signOut()
             currentUser = nil
             currentClinic = nil
             isAuthenticated = false
@@ -400,24 +479,47 @@ class AuthManager: ObservableObject {
     // ══════════════════════════════════════════════════════
 
     func resetPassword(email: String) async throws {
-        try await Auth.auth().sendPasswordReset(withEmail: email)
-        print("Password reset email sent to \(email)")
+        errorMessage = nil
+        let normalizedEmail = Self.normalizeEmail(email)
+        try await Auth.auth().sendPasswordReset(withEmail: normalizedEmail)
+        print("Password reset email sent to \(normalizedEmail)")
     }
 
     // ══════════════════════════════════════════════════════
-    // MARK: - Remember Me
+    // MARK: - Remembered Email Persistence
     // ══════════════════════════════════════════════════════
 
     var savedEmail: String? {
-        UserDefaults.standard.string(forKey: "savedEmail")
+        UserDefaults.standard.string(forKey: Self.savedEmailKey)
     }
 
     var hasRememberedEmail: Bool {
         savedEmail != nil
     }
 
+    func rememberEmail(_ email: String) {
+        let normalized = Self.normalizeEmail(email)
+        guard !normalized.isEmpty else {
+            forgetEmail()
+            return
+        }
+        UserDefaults.standard.set(normalized, forKey: Self.savedEmailKey)
+    }
+
+    func forgetEmail() {
+        UserDefaults.standard.removeObject(forKey: Self.savedEmailKey)
+    }
+
     // ══════════════════════════════════════════════════════
-    // MARK: - Apple Sign-In Helpers
+    // MARK: - Helpers
+    // ══════════════════════════════════════════════════════
+
+    private static func normalizeEmail(_ email: String) -> String {
+        return email.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    }
+
+    // ══════════════════════════════════════════════════════
+    // MARK: - Apple Sign-In Nonce Helpers
     // ══════════════════════════════════════════════════════
 
     private func randomNonceString(length: Int = 32) -> String {
@@ -431,7 +533,6 @@ class AuthManager: ObservableObject {
         if errorCode != errSecSuccess {
             fatalError("Unable to generate nonce.")
         }
-        // FIXED: Was missing 'W' in the uppercase letters.
         let charset: [Character] = Array(
             "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz-._"
         )
@@ -466,6 +567,9 @@ class AuthManager: ObservableObject {
     enum AuthError: LocalizedError {
         case noRootViewController
         case missingToken
+        case invalidRegistrationInput
+        case invalidJoinInput
+        case noInvitation
 
         var errorDescription: String? {
             switch self {
@@ -473,6 +577,12 @@ class AuthManager: ObservableObject {
                 return "Unable to find root view controller."
             case .missingToken:
                 return "Authentication failed. Please try again."
+            case .invalidRegistrationInput:
+                return "Please fill in all registration fields."
+            case .invalidJoinInput:
+                return "Please enter a valid email."
+            case .noInvitation:
+                return "No invitation found for this email. Ask your clinic admin to invite you first."
             }
         }
     }
@@ -480,16 +590,10 @@ class AuthManager: ObservableObject {
 
 // ══════════════════════════════════════════════════════
 // MARK: - Preview Support
-//
-// Use AuthManager.preview() in #Preview blocks to get a manager
-// that doesn't touch Firebase. Pass isAuthenticated/currentUser
-// to preview different states.
 // ══════════════════════════════════════════════════════
 
 #if DEBUG
 extension AuthManager {
-    /// Creates an AuthManager safe for SwiftUI previews.
-    /// Does not attach a Firebase auth listener.
     static func preview(
         isAuthenticated: Bool = false,
         currentUser: AppUser? = nil,

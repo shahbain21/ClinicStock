@@ -4,10 +4,20 @@
 //
 //  Created by Mohamed Shahbain on 4/18/26.
 //
-
+//  FIXES:
+//  - Removed the stray `import Foundation` that appeared inside the file
+//    body (SwiftUI already brings Foundation transitively).
+//  - Duplicate file header removed.
+//  - Empty button actions replaced with explicit TODO prints so it's
+//    clear they're stubs, not silent dead UI. Proper cross-tab nav
+//    is a separate follow-up.
+//  - Added a #Preview.
 //
-//  DashboardView.swift
-//  ClinicStock
+//  DEFERRED:
+//  - Multi-clinic overview (mockup shows multiple clinics — single
+//    clinic for now per design decision).
+//  - Cross-tab navigation for "View Alerts" / "View All" — requires a
+//    shared NavigationCoordinator object that doesn't exist yet.
 //
 
 import SwiftUI
@@ -57,7 +67,10 @@ struct DashboardView: View {
                     // ── Low Stock Alert Banner ──
                     if lowStockCount > 0 {
                         LowStockBanner(count: lowStockCount) {
-                            // Navigate to inventory with Low filter
+                            // TODO: Cross-tab navigation. Needs a shared
+                            // NavigationCoordinator to switch the tab to
+                            // Inventory and pre-apply the `Low` filter.
+                            print("TODO: navigate to Inventory (Low filter)")
                         }
                         .padding(.horizontal, AppSpacing.lg)
                     }
@@ -69,7 +82,8 @@ struct DashboardView: View {
                                 title: "Recent Activity",
                                 action: "View All"
                             ) {
-                                // Navigate to History tab
+                                // TODO: Cross-tab navigation to History tab.
+                                print("TODO: navigate to History tab")
                             }
 
                             VStack(spacing: AppSpacing.sm) {
@@ -82,6 +96,9 @@ struct DashboardView: View {
                     }
 
                     // ── Clinic Overview ──
+                    // Single-clinic for now. Multi-clinic is a future
+                    // feature — requires AppUser supporting multiple clinic
+                    // memberships and cross-clinic activity queries.
                     if let clinic = authManager.currentClinic {
                         VStack(spacing: AppSpacing.md) {
                             AppSectionHeader(title: "Clinic Overview")
@@ -129,7 +146,10 @@ struct DashboardView: View {
     }
 }
 
-// ── Dashboard Stat Card (3-across style) ──
+// ══════════════════════════════════════════════════════
+// MARK: - Dashboard Stat Card (3-across style)
+// ══════════════════════════════════════════════════════
+
 struct DashboardStatCard: View {
     let title: String
     let value: String
@@ -159,7 +179,10 @@ struct DashboardStatCard: View {
     }
 }
 
-// ── Recent Activity Row ──
+// ══════════════════════════════════════════════════════
+// MARK: - Recent Activity Row
+// ══════════════════════════════════════════════════════
+
 struct RecentActivityRow: View {
     let log: HistoryLog
 
@@ -194,7 +217,12 @@ struct RecentActivityRow: View {
     }
 }
 
-import Foundation
+// ══════════════════════════════════════════════════════
+// MARK: - Date formatting helper
+//
+// Lives here for now. When other views need relative timestamps, move
+// this to a shared DateFormatting.swift utility file.
+// ══════════════════════════════════════════════════════
 
 extension Date {
     func timeAgoDisplay() -> String {
@@ -203,10 +231,23 @@ extension Date {
         if seconds < 60 { return "Just now" }
         if seconds < 3600 { return "\(seconds / 60) min ago" }
         if seconds < 86400 { return "\(seconds / 3600)h ago" }
-        if seconds < 604800 { return "\(seconds / 86400) day\(seconds / 86400 == 1 ? "" : "s") ago" }
+        if seconds < 604800 {
+            let days = seconds / 86400
+            return "\(days) day\(days == 1 ? "" : "s") ago"
+        }
 
         let formatter = DateFormatter()
         formatter.dateFormat = "MMM d"
         return formatter.string(from: self)
     }
+}
+
+// ══════════════════════════════════════════════════════
+// MARK: - Preview
+// ══════════════════════════════════════════════════════
+
+#Preview {
+    DashboardView()
+        .environmentObject(AuthManager.preview())
+        .environmentObject(InventoryManager())
 }

@@ -3,11 +3,25 @@
 //  ClinicStock
 //
 //  FIXES:
-//  - NLM results now saved to Firestore via DatabaseService
-//  - Routed Firestore operations through DatabaseService where practical
-//  - loadCatalog uses DatabaseService.getAllCatalogItems()
-//  - confirmAndSaveGTIN uses DatabaseService
-//  - saveCommonName uses DatabaseService
+//  - Deduplicated catalog load (was racing between init and first search)
+//  - Concurrent search() calls cancel the previous one (no stale results)
+//  - HCPCS codes consistently uppercased at ingestion (NLM results, saves)
+//  - NLM results return immediately; Firestore persistence happens async
+//    so the user sees results without waiting for N sequential writes
+//  - isSearching set for the entire search, not just the NLM phase
+//  - Category assignment from NLM defaults to "General Medical" instead of
+//    a wild guess from the code's letter — staff categorize during add
+//  - sourceYear uses the actual current year, not a hardcoded 2026
+//  - GTIN from a parenthesized GS1 scan now auto-associated with the HCPCS
+//    code when both are present in the same barcode
+//  - lookupBarcode cache mutation extracted to cacheItem() helper
+//  - commonName matching normalizes defensively (not trusting data invariants)
+//  - isLoaded resets to false on load failure so subsequent calls retry
+//  - Dropped unused Combine import
+//  - refreshCatalog() added so admin tools can force a reload without
+//    restarting the app
+//  - catalogSize computed property added so views don't hardcode counts
+//  - clearResults() added so views don't mutate @Published state directly
 //
 
 import Foundation
@@ -28,6 +42,12 @@ class HCPCSSearchService: ObservableObject {
     private let dbService = DatabaseService.shared
     private let nlmBaseURL = "https://clinicaltables.nlm.nih.gov/api/hcpcs/v3/search"
 
+    // Deduplicate concurrent loads so init + first search don't double-fetch
+    private var loadTask: Task<Void, Never>?
+
+    // Track in-flight search so we can cancel on rapid typing
+    private var searchTask: Task<Void, Never>?
+
     init() {
         Task {
             await loadCatalog()
@@ -35,37 +55,99 @@ class HCPCSSearchService: ObservableObject {
     }
 
     // ══════════════════════════════════════════════════════
+    // MARK: - Public read-only accessors
+    // ══════════════════════════════════════════════════════
+
+    /// Total number of items currently loaded. Views should use this
+    /// instead of hardcoding counts.
+    var catalogSize: Int {
+        catalog.count
+    }
+
+    // ══════════════════════════════════════════════════════
     // MARK: - Load full catalog once
     // ══════════════════════════════════════════════════════
 
+    /// Loads the catalog from Firestore. Safe to call concurrently —
+    /// overlapping callers share the same underlying fetch.
     func loadCatalog() async {
+        // If a load is already running, wait for it instead of firing another.
+        if let existing = loadTask {
+            await existing.value
+            return
+        }
+
+        let task = Task {
+            await performLoad()
+        }
+        loadTask = task
+        await task.value
+        loadTask = nil
+    }
+
+    private func performLoad() async {
         print("Starting catalog load...")
         do {
-            catalog = try await dbService.getAllCatalogItems()
-            print("Catalog loaded: \(catalog.count) items")
+            let loaded = try await dbService.getAllCatalogItems()
+            catalog = loaded
             isLoaded = true
+            errorMessage = nil
+            print("Catalog loaded: \(loaded.count) items")
         } catch {
-            print("Failed to load catalog: \(error.localizedDescription)")
+            isLoaded = false
             errorMessage = "Failed to load catalog"
+            print("Failed to load catalog: \(error.localizedDescription)")
         }
+    }
+
+    /// Forces a fresh fetch from Firestore, replacing the in-memory catalog.
+    /// Useful after bulk imports or admin-triggered refreshes.
+    func refreshCatalog() async {
+        loadTask = nil  // invalidate any cached completion
+        isLoaded = false
+        await loadCatalog()
     }
 
     // ══════════════════════════════════════════════════════
     // MARK: - Text search — client side, instant
     // ══════════════════════════════════════════════════════
 
-    func search(query: String) async {
+    /// Starts a new search, cancelling any previous in-flight search.
+    /// Results flow to the @Published `results` property.
+    func search(query: String) {
+        searchTask?.cancel()
+        searchTask = Task {
+            await performSearch(query: query)
+        }
+    }
+
+    /// Clears search results and cancels any in-flight search. Use this
+    /// when the user clears the search field.
+    func clearResults() {
+        searchTask?.cancel()
+        results = []
+        isSearching = false
+    }
+
+    private func performSearch(query: String) async {
         let trimmed = query.trimmingCharacters(in: .whitespaces).lowercased()
 
         guard trimmed.count >= 2 else {
             results = []
+            isSearching = false
             return
         }
+
+        isSearching = true
+        defer { isSearching = false }
 
         // Wait for catalog to finish loading if it hasn't yet
         if !isLoaded {
             await loadCatalog()
         }
+
+        // Check for cancellation after the load (catalog load may take a sec)
+        if Task.isCancelled { return }
 
         // Search locally first — instant
         let localResults = searchLocally(query: trimmed)
@@ -75,11 +157,11 @@ class HCPCSSearchService: ObservableObject {
             return
         }
 
-        // Nothing local — try NLM
-        isSearching = true
+        // Nothing local — try NLM (respects cancellation internally)
         let nlmResults = await searchNLM(query: trimmed)
+
+        if Task.isCancelled { return }
         results = deduplicated(nlmResults)
-        isSearching = false
     }
 
     // ══════════════════════════════════════════════════════
@@ -89,12 +171,18 @@ class HCPCSSearchService: ObservableObject {
     func lookupBarcode(_ rawValue: String) async -> BarcodeSearchResult {
         let parsed = BarcodeService.parse(rawValue)
 
-        // Direct HCPCS code scan
+        // Direct HCPCS code scan — may also carry a GTIN on GS1 packaging
         if let hcpcsCode = parsed.hcpcsCode {
+            let normalized = hcpcsCode.uppercased()
             if let item = catalog.first(where: {
-                $0.hcpcsCode.uppercased() == hcpcsCode.uppercased()
+                $0.hcpcsCode.uppercased() == normalized
             }) {
-                return .found(item, gtin: nil)
+                // Opportunistically associate the GTIN if the scan had one
+                // and we don't already know about it.
+                if let gtin = parsed.gtin, !(item.gtins?.contains(gtin) ?? false) {
+                    Task { await confirmAndSaveGTIN(gtin: gtin, forItem: item) }
+                }
+                return .found(item, gtin: parsed.gtin)
             }
         }
 
@@ -107,21 +195,13 @@ class HCPCSSearchService: ObservableObject {
             // Not in local catalog — check Firestore
             do {
                 if let item = try await dbService.getCatalogItemByGTIN(gtin: gtin) {
-                    // Update local cache
-                    if let index = catalog.firstIndex(where: {
-                        $0.hcpcsCode == item.hcpcsCode
-                    }) {
-                        catalog[index] = item
-                    } else {
-                        catalog.append(item)
-                    }
+                    cacheItem(item)
                     return .found(item, gtin: gtin)
                 }
             } catch {
                 print("GTIN Firestore lookup error: \(error)")
             }
 
-            // GTIN not found anywhere
             return .gtinNotFound(gtin: gtin, parsed: parsed)
         }
 
@@ -133,15 +213,14 @@ class HCPCSSearchService: ObservableObject {
     // ══════════════════════════════════════════════════════
 
     func confirmAndSaveGTIN(gtin: String, forItem item: HCPCSCatalogItem) async {
-        do {
-            try await dbService.addGTINToCatalog(
-                code: item.hcpcsCode,
-                gtin: gtin
-            )
+        let code = item.hcpcsCode.uppercased()
 
-            // Update local cache immediately
+        do {
+            try await dbService.addGTINToCatalog(code: code, gtin: gtin)
+
+            // Update local cache
             if let index = catalog.firstIndex(where: {
-                $0.hcpcsCode == item.hcpcsCode
+                $0.hcpcsCode.uppercased() == code
             }) {
                 var updated = catalog[index]
                 if updated.gtins == nil {
@@ -152,7 +231,7 @@ class HCPCSSearchService: ObservableObject {
                 catalog[index] = updated
             }
 
-            print("GTIN \(gtin) saved to \(item.hcpcsCode)")
+            print("GTIN \(gtin) saved to \(code)")
         } catch {
             print("Failed to save GTIN: \(error)")
         }
@@ -166,21 +245,23 @@ class HCPCSSearchService: ObservableObject {
         let normalized = name.lowercased().trimmingCharacters(in: .whitespaces)
         guard !normalized.isEmpty else { return }
 
+        let normalizedCode = code.uppercased()
+
         do {
             try await dbService.addCommonNameToCatalog(
-                code: code,
+                code: normalizedCode,
                 name: normalized
             )
 
             if let index = catalog.firstIndex(where: {
-                $0.hcpcsCode.uppercased() == code.uppercased()
+                $0.hcpcsCode.uppercased() == normalizedCode
             }) {
                 if !catalog[index].commonNames.contains(normalized) {
                     catalog[index].commonNames.append(normalized)
                 }
             }
 
-            print("Common name '\(normalized)' saved to \(code)")
+            print("Common name '\(normalized)' saved to \(normalizedCode)")
         } catch {
             print("Failed to save common name: \(error)")
         }
@@ -191,8 +272,9 @@ class HCPCSSearchService: ObservableObject {
     // ══════════════════════════════════════════════════════
 
     func lookupByCode(_ code: String) -> HCPCSCatalogItem? {
+        let normalized = code.uppercased()
         return catalog.first(where: {
-            $0.hcpcsCode.uppercased() == code.uppercased()
+            $0.hcpcsCode.uppercased() == normalized
         })
     }
 
@@ -215,6 +297,21 @@ class HCPCSSearchService: ObservableObject {
     }
 
     // ══════════════════════════════════════════════════════
+    // MARK: - Private: cache mutations
+    // ══════════════════════════════════════════════════════
+
+    private func cacheItem(_ item: HCPCSCatalogItem) {
+        let code = item.hcpcsCode.uppercased()
+        if let index = catalog.firstIndex(where: {
+            $0.hcpcsCode.uppercased() == code
+        }) {
+            catalog[index] = item
+        } else {
+            catalog.append(item)
+        }
+    }
+
+    // ══════════════════════════════════════════════════════
     // MARK: - Private: local search
     // ══════════════════════════════════════════════════════
 
@@ -225,7 +322,11 @@ class HCPCSSearchService: ObservableObject {
         let matched = catalog.filter { item in
             tokens.allSatisfy { token in
                 if item.hcpcsCode.lowercased().contains(token) { return true }
-                if item.commonNames.contains(where: { $0.contains(token) }) { return true }
+                // Normalize commonNames defensively even though they SHOULD
+                // already be lowercased — don't trust the data invariant.
+                if item.commonNames.contains(where: {
+                    $0.lowercased().contains(token)
+                }) { return true }
                 if item.clinicalName.lowercased().contains(token) { return true }
                 if item.category.lowercased().contains(token) { return true }
                 return false
@@ -233,8 +334,8 @@ class HCPCSSearchService: ObservableObject {
         }
 
         return matched.sorted { a, b in
-            let aExact = a.commonNames.contains(where: { $0 == query })
-            let bExact = b.commonNames.contains(where: { $0 == query })
+            let aExact = a.commonNames.contains(where: { $0.lowercased() == query })
+            let bExact = b.commonNames.contains(where: { $0.lowercased() == query })
             if aExact != bExact { return aExact }
             return a.hcpcsCode < b.hcpcsCode
         }
@@ -242,7 +343,10 @@ class HCPCSSearchService: ObservableObject {
 
     // ══════════════════════════════════════════════════════
     // MARK: - Private: NLM fallback
-    // Now saves new items to Firestore for future searches
+    //
+    // Returns new HCPCSCatalogItem values immediately for the UI.
+    // Firestore persistence and local cache updates run in the background
+    // so the user doesn't wait on N sequential writes.
     // ══════════════════════════════════════════════════════
 
     private func searchNLM(query: String) async -> [HCPCSCatalogItem] {
@@ -264,60 +368,85 @@ class HCPCSSearchService: ObservableObject {
                   let pairs = json[3] as? [[String]]
             else { return [] }
 
-            var newItems: [HCPCSCatalogItem] = []
+            var resultItems: [HCPCSCatalogItem] = []
+            var newlyDiscovered: [HCPCSCatalogItem] = []
+
+            let currentYear = Calendar.current.component(.year, from: Date())
 
             for pair in pairs {
                 guard pair.count >= 2 else { continue }
-                let code = pair[0]
+                let code = pair[0].uppercased()
                 let clinical = pair[1]
                 guard isDMECode(code) else { continue }
 
-                // Return from local cache if already exists
-                if let existing = catalog.first(where: { $0.hcpcsCode == code }) {
-                    newItems.append(existing)
+                // If we already have it, just include the cached version
+                if let existing = catalog.first(where: {
+                    $0.hcpcsCode.uppercased() == code
+                }) {
+                    resultItems.append(existing)
                     continue
                 }
 
-                // Create new item
+                // New item — default category assignment is intentionally
+                // conservative. Staff can recategorize when they add stock.
                 let item = HCPCSCatalogItem(
                     hcpcsCode: code,
                     clinicalName: clinical,
                     commonNames: [query.lowercased()],
-                    category: categoryForCode(code),
+                    category: defaultCategory,
                     gtins: [],
                     isActive: true,
-                    sourceYear: 2026,
+                    sourceYear: currentYear,
                     lastUpdated: Date()
                 )
 
-                newItems.append(item)
+                resultItems.append(item)
+                newlyDiscovered.append(item)
+            }
 
-                // Save to Firestore so future searches find it locally
-                do {
-                    try await dbService.saveCatalogItem([
-                        "hcpcsCode": code,
-                        "clinicalName": clinical,
-                        "commonNames": [query.lowercased()],
-                        "category": categoryForCode(code),
-                        "gtins": [] as [String],
-                        "isActive": true,
-                        "sourceYear": 2026,
-                        "lastUpdated": Timestamp(date: Date())
-                    ])
+            // Optimistic: add to local cache immediately so subsequent
+            // searches don't hit NLM again during this session.
+            for item in newlyDiscovered {
+                cacheItem(item)
+            }
 
-                    // Add to local cache
-                    catalog.append(item)
-                    print("Saved NLM result to catalog: \(code)")
-                } catch {
-                    print("Failed to save NLM result \(code): \(error)")
+            // Persist newly discovered items in the background.
+            // User sees results without waiting on Firestore writes.
+            if !newlyDiscovered.isEmpty {
+                Task.detached { [weak self] in
+                    guard let self = self else { return }
+                    await self.persistNLMItems(newlyDiscovered, year: currentYear)
                 }
             }
 
-            return newItems
+            return resultItems
 
         } catch {
             print("NLM error: \(error)")
             return []
+        }
+    }
+
+    private func persistNLMItems(
+        _ items: [HCPCSCatalogItem],
+        year: Int
+    ) async {
+        for item in items {
+            do {
+                try await dbService.saveCatalogItem([
+                    "hcpcsCode": item.hcpcsCode,
+                    "clinicalName": item.clinicalName,
+                    "commonNames": item.commonNames,
+                    "category": item.category,
+                    "gtins": [] as [String],
+                    "isActive": true,
+                    "sourceYear": year,
+                    "lastUpdated": Timestamp(date: Date())
+                ])
+                print("Saved NLM result to catalog: \(item.hcpcsCode)")
+            } catch {
+                print("Failed to save NLM result \(item.hcpcsCode): \(error)")
+            }
         }
     }
 
@@ -327,7 +456,7 @@ class HCPCSSearchService: ObservableObject {
 
     private func deduplicated(_ items: [HCPCSCatalogItem]) -> [HCPCSCatalogItem] {
         var seen = Set<String>()
-        return items.filter { seen.insert($0.hcpcsCode).inserted }
+        return items.filter { seen.insert($0.hcpcsCode.uppercased()).inserted }
     }
 
     private func isDMECode(_ code: String) -> Bool {
@@ -335,16 +464,10 @@ class HCPCSSearchService: ObservableObject {
         return ["A", "E", "K", "L"].contains(String(first).uppercased())
     }
 
-    private func categoryForCode(_ code: String) -> String {
-        guard let first = code.first else { return "General Medical" }
-        switch String(first).uppercased() {
-        case "E": return "Durable Medical Equipment"
-        case "L": return "Orthopedic"
-        case "A": return "Medical Supplies"
-        case "K": return "Wheelchairs"
-        default: return "General Medical"
-        }
-    }
+    // Default category for NLM-imported items. Chosen to match an entry
+    // in the settings/categories list seeded by DatabaseSeeder so the
+    // filter UI stays consistent.
+    private let defaultCategory = "General Medical"
 }
 
 // ══════════════════════════════════════════════════════

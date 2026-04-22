@@ -1,20 +1,22 @@
 //
-//  InventoryView.swift
+//  InventoryListView.swift
 //  ClinicStock
 //
 //  Created by Mohamed Shahbain on 4/18/26.
 //
-
-//
-//  InventoryListView.swift
-//  ClinicStock
-//
-
-//
-//  InventoryListView.swift
-//  ClinicStock
-//
-//  Created by Mohamed Shahbain
+//  FIXES:
+//  - NavigationLink destination wired to real ItemDetailView.
+//  - "Add An Item" sheet wired to real AddItemView.
+//  - Dead showScanner state removed (scanner belongs with CatalogSearchView
+//    and will be shared once extracted; scan buttons here were dead UI).
+//  - Listener error banner at top of list so connection loss is visible
+//    instead of masquerading as empty inventory.
+//  - .safeAreaInset(edge: .bottom) replaces the magic 120pt bottom
+//    padding. Bottom bar stacks correctly over the tab bar automatically.
+//  - Sort menu shows checkmark on the active sort.
+//  - Search trims whitespace before matching.
+//  - Preview uses AuthManager.preview() + full environment.
+//  - Duplicate header comments cleaned up.
 //
 
 import SwiftUI
@@ -27,7 +29,6 @@ struct InventoryListView: View {
     @State private var searchText = ""
     @State private var selectedFilter: StockFilter = .all
     @State private var showAddItem = false
-    @State private var showScanner = false
     @State private var sortOrder: SortOrder = .nameAsc
 
     enum StockFilter: String, CaseIterable {
@@ -36,11 +37,14 @@ struct InventoryListView: View {
         case out = "Out"
     }
 
-    enum SortOrder {
+    enum SortOrder: Hashable {
         case nameAsc, nameDesc, qtyAsc, qtyDesc
     }
 
-    // ── Filtered + sorted items ──
+    // ══════════════════════════════════════════════════════
+    // MARK: - Derived data
+    // ══════════════════════════════════════════════════════
+
     var filteredItems: [InventoryItem] {
         var items = inventoryManager.items
 
@@ -54,9 +58,10 @@ struct InventoryListView: View {
             items = items.filter { $0.quantity <= 0 }
         }
 
-        // Search
-        if !searchText.isEmpty {
-            let query = searchText.lowercased()
+        // Search — trim so whitespace-only queries don't distort results
+        let trimmed = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmed.isEmpty {
+            let query = trimmed.lowercased()
             items = items.filter {
                 $0.name.lowercased().contains(query) ||
                 $0.hcpcsCode.lowercased().contains(query) ||
@@ -81,141 +86,29 @@ struct InventoryListView: View {
         return items
     }
 
+    private func countFor(_ filter: StockFilter) -> Int? {
+        switch filter {
+        case .all: return nil
+        case .low: return inventoryManager.items.filter { $0.isLowStock && $0.quantity > 0 }.count
+        case .out: return inventoryManager.items.filter { $0.quantity <= 0 }.count
+        }
+    }
+
+    private var canAddStock: Bool {
+        PermissionManager.canAddStock(role: authManager.currentUser?.role ?? .staff)
+    }
+
+    // ══════════════════════════════════════════════════════
+    // MARK: - Body
+    // ══════════════════════════════════════════════════════
+
     var body: some View {
         NavigationStack {
             VStack(spacing: 0) {
-
-                // ── Search Bar ──
-                HStack(spacing: AppSpacing.md) {
-                    AppSearchBar(text: $searchText, placeholder: "Search")
-
-                    Button(action: { showScanner = true }) {
-                        Image(systemName: "barcode.viewfinder")
-                            .font(.system(size: 18))
-                            .foregroundColor(AppColors.textTertiary)
-                            .frame(width: 36, height: 36)
-                    }
-                }
-                .padding(.horizontal, AppSpacing.lg)
-                .padding(.top, AppSpacing.md)
-
-                // ── Filter Pills ──
-                HStack(spacing: AppSpacing.sm) {
-                    ForEach(StockFilter.allCases, id: \.self) { filter in
-                        FilterPill(
-                            title: filter.rawValue,
-                            count: countFor(filter),
-                            isSelected: selectedFilter == filter
-                        ) {
-                            withAnimation(.easeInOut(duration: 0.2)) {
-                                selectedFilter = filter
-                            }
-                        }
-                    }
-
-                    // Sort button
-                    Menu {
-                        Button("Name A→Z") { sortOrder = .nameAsc }
-                        Button("Name Z→A") { sortOrder = .nameDesc }
-                        Button("Qty Low→High") { sortOrder = .qtyAsc }
-                        Button("Qty High→Low") { sortOrder = .qtyDesc }
-                    } label: {
-                        HStack(spacing: AppSpacing.xs) {
-                            Image(systemName: "arrow.up.arrow.down")
-                                .font(.system(size: 12))
-                            Text("Sort")
-                                .font(AppFonts.captionMedium)
-                        }
-                        .foregroundColor(AppColors.textSecondary)
-                        .padding(.horizontal, AppSpacing.md)
-                        .padding(.vertical, AppSpacing.sm)
-                        .background(
-                            Capsule()
-                                .fill(AppColors.cardBackground)
-                                .overlay(
-                                    Capsule().stroke(AppColors.border, lineWidth: 1)
-                                )
-                        )
-                    }
-
-                    Spacer()
-                }
-                .padding(.horizontal, AppSpacing.lg)
-                .padding(.top, AppSpacing.md)
-
-                // ── Loading ──
-                if inventoryManager.isLoading {
-                    Spacer()
-                    ProgressView("Loading inventory...")
-                        .foregroundColor(AppColors.textSecondary)
-                    Spacer()
-                }
-                // ── Empty State ──
-                else if filteredItems.isEmpty {
-                    Spacer()
-                    EmptyStateView(
-                        icon: "shippingbox",
-                        title: searchText.isEmpty ? "No Items" : "No Results",
-                        message: searchText.isEmpty
-                            ? "Add inventory items to get started"
-                            : "Try a different search term"
-                    )
-                    Spacer()
-                }
-                // ── Item List ──
-                else {
-                    ScrollView {
-                        LazyVStack(spacing: AppSpacing.sm) {
-                            ForEach(filteredItems) { item in
-                                NavigationLink(value: item) {
-                                    InventoryItemRow(item: item)
-                                }
-                                .buttonStyle(.plain)
-                            }
-                        }
-                        .padding(.horizontal, AppSpacing.lg)
-                        .padding(.top, AppSpacing.md)
-                        .padding(.bottom, 120) // Space for bottom buttons + tab bar
-                    }
-                }
-
-                // ── Bottom Action Buttons ──
-                if PermissionManager.canAddStock(role: authManager.currentUser?.role ?? .staff) {
-                    HStack(spacing: AppSpacing.md) {
-                        Button(action: { showAddItem = true }) {
-                            HStack(spacing: AppSpacing.sm) {
-                                Image(systemName: "plus.circle.fill")
-                                Text("Add An Item")
-                            }
-                            .font(AppFonts.bodySemibold)
-                            .foregroundColor(.white)
-                            .frame(maxWidth: .infinity)
-                            .frame(height: 48)
-                            .background(
-                                RoundedRectangle(cornerRadius: AppRadius.medium)
-                                    .fill(AppColors.accent)
-                            )
-                        }
-
-                        Button(action: { showScanner = true }) {
-                            HStack(spacing: AppSpacing.sm) {
-                                Image(systemName: "barcode.viewfinder")
-                                Text("Scan An Item")
-                            }
-                            .font(AppFonts.bodySemibold)
-                            .foregroundColor(.white)
-                            .frame(maxWidth: .infinity)
-                            .frame(height: 48)
-                            .background(
-                                RoundedRectangle(cornerRadius: AppRadius.medium)
-                                    .fill(AppColors.primary)
-                            )
-                        }
-                    }
-                    .padding(.horizontal, AppSpacing.lg)
-                    .padding(.vertical, AppSpacing.md)
-                    .background(AppColors.background)
-                }
+                connectionBanner
+                searchBar
+                filterBar
+                listContent
             }
             .appBackground()
             .navigationTitle("Inventory")
@@ -226,23 +119,184 @@ struct InventoryListView: View {
                 }
             }
             .navigationDestination(for: InventoryItem.self) { item in
-                // TODO: Replace with ItemDetailView
-                Text("Detail for \(item.name)")
+                ItemDetailView(item: item)
             }
             .sheet(isPresented: $showAddItem) {
-                // TODO: Replace with AddItemView
-                Text("Add Item")
+                AddItemView()
+                    .environmentObject(authManager)
+                    .environmentObject(inventoryManager)
+            }
+            .safeAreaInset(edge: .bottom) {
+                if canAddStock {
+                    bottomBar
+                }
             }
         }
     }
 
-    // ── Count helper ──
-    private func countFor(_ filter: StockFilter) -> Int? {
-        switch filter {
-        case .all: return nil
-        case .low: return inventoryManager.items.filter { $0.isLowStock && $0.quantity > 0 }.count
-        case .out: return inventoryManager.items.filter { $0.quantity <= 0 }.count
+    // ══════════════════════════════════════════════════════
+    // MARK: - Subviews
+    // ══════════════════════════════════════════════════════
+
+    @ViewBuilder
+    private var connectionBanner: some View {
+        if let error = inventoryManager.listenerError {
+            HStack(spacing: AppSpacing.sm) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundColor(AppColors.warning)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Connection issue")
+                        .font(AppFonts.captionSemibold)
+                        .foregroundColor(AppColors.textPrimary)
+                    Text(error.localizedDescription)
+                        .font(AppFonts.footnote)
+                        .foregroundColor(AppColors.textSecondary)
+                        .lineLimit(2)
+                }
+                Spacer()
+                Button("Retry") {
+                    retryListener()
+                }
+                .font(AppFonts.captionSemibold)
+                .foregroundColor(AppColors.accent)
+            }
+            .padding(AppSpacing.md)
+            .background(AppColors.warningLight)
+            .overlay(
+                Rectangle()
+                    .fill(AppColors.warning.opacity(0.3))
+                    .frame(height: 1),
+                alignment: .bottom
+            )
         }
+    }
+
+    private var searchBar: some View {
+        AppSearchBar(text: $searchText, placeholder: "Search")
+            .padding(.horizontal, AppSpacing.lg)
+            .padding(.top, AppSpacing.md)
+    }
+
+    private var filterBar: some View {
+        HStack(spacing: AppSpacing.sm) {
+            ForEach(StockFilter.allCases, id: \.self) { filter in
+                FilterPill(
+                    title: filter.rawValue,
+                    count: countFor(filter),
+                    isSelected: selectedFilter == filter
+                ) {
+                    withAnimation(.easeInOut(duration: 0.2)) {
+                        selectedFilter = filter
+                    }
+                }
+            }
+
+            sortMenu
+
+            Spacer()
+        }
+        .padding(.horizontal, AppSpacing.lg)
+        .padding(.top, AppSpacing.md)
+    }
+
+    private var sortMenu: some View {
+        Menu {
+            sortButton(label: "Name A→Z", order: .nameAsc)
+            sortButton(label: "Name Z→A", order: .nameDesc)
+            sortButton(label: "Qty Low→High", order: .qtyAsc)
+            sortButton(label: "Qty High→Low", order: .qtyDesc)
+        } label: {
+            HStack(spacing: AppSpacing.xs) {
+                Image(systemName: "arrow.up.arrow.down")
+                    .font(.system(size: 12))
+                Text("Sort")
+                    .font(AppFonts.captionMedium)
+            }
+            .foregroundColor(AppColors.textSecondary)
+            .padding(.horizontal, AppSpacing.md)
+            .padding(.vertical, AppSpacing.sm)
+            .background(
+                Capsule()
+                    .fill(AppColors.cardBackground)
+                    .overlay(Capsule().stroke(AppColors.border, lineWidth: 1))
+            )
+        }
+    }
+
+    private func sortButton(label: String, order: SortOrder) -> some View {
+        Button {
+            sortOrder = order
+        } label: {
+            if sortOrder == order {
+                Label(label, systemImage: "checkmark")
+            } else {
+                Text(label)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var listContent: some View {
+        if inventoryManager.isLoading && inventoryManager.items.isEmpty {
+            Spacer()
+            ProgressView("Loading inventory...")
+                .foregroundColor(AppColors.textSecondary)
+            Spacer()
+
+        } else if filteredItems.isEmpty {
+            Spacer()
+            EmptyStateView(
+                icon: "shippingbox",
+                title: searchText.isEmpty ? "No Items" : "No Results",
+                message: searchText.isEmpty
+                    ? "Add inventory items to get started"
+                    : "Try a different search term"
+            )
+            Spacer()
+
+        } else {
+            ScrollView {
+                LazyVStack(spacing: AppSpacing.sm) {
+                    ForEach(filteredItems) { item in
+                        NavigationLink(value: item) {
+                            InventoryItemRow(item: item)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(.horizontal, AppSpacing.lg)
+                .padding(.top, AppSpacing.md)
+            }
+        }
+    }
+
+    private var bottomBar: some View {
+        Button(action: { showAddItem = true }) {
+            HStack(spacing: AppSpacing.sm) {
+                Image(systemName: "plus.circle.fill")
+                Text("Add An Item")
+            }
+            .font(AppFonts.bodySemibold)
+            .foregroundColor(.white)
+            .frame(maxWidth: .infinity)
+            .frame(height: 48)
+            .background(
+                RoundedRectangle(cornerRadius: AppRadius.medium)
+                    .fill(AppColors.accent)
+            )
+        }
+        .padding(.horizontal, AppSpacing.lg)
+        .padding(.vertical, AppSpacing.md)
+        .background(AppColors.background)
+    }
+
+    // ══════════════════════════════════════════════════════
+    // MARK: - Actions
+    // ══════════════════════════════════════════════════════
+
+    private func retryListener() {
+        guard let clinicID = authManager.currentUser?.clinicID else { return }
+        inventoryManager.startListening(clinicID: clinicID)
     }
 }
 
@@ -272,7 +326,6 @@ struct InventoryItemRow: View {
 
             Spacer()
 
-            // Quantity badge
             VStack(spacing: 2) {
                 Text("\(item.quantity)")
                     .font(AppFonts.quantitySmall)
@@ -380,6 +433,8 @@ struct NotificationBell: View {
 
 #Preview {
     InventoryListView()
-        .environmentObject(AuthManager())
+        .environmentObject(AuthManager.preview())
         .environmentObject(InventoryManager())
+        .environmentObject(UserManager())
+        .environmentObject(HCPCSSearchService())
 }

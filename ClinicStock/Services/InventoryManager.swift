@@ -235,7 +235,7 @@ class InventoryManager: ObservableObject {
         checkoutTime: Date,
         by user: AppUser
     ) async throws {
-        guard PermissionManager.canVoidOwnCheckout(
+        guard PermissionManager.canVoidRecentCheckout(
             role: user.role,
             checkoutTime: checkoutTime
         ) else {

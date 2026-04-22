@@ -4,10 +4,19 @@
 //
 //  Created by Mohamed Shahbain
 //
-//  FIXED:
-//  - Uses .onChange to watch for currentUser being set
-//  - Starts listening as soon as clinicID is available
-//  - Stops listening on sign out
+//  FIXES:
+//  - Single source of truth for the inventory listener lifecycle.
+//    Previously both RootView and MainTabView called startListening,
+//    which meant every sign-in tore down and recreated the Firestore
+//    listener 2-3 times.
+//  - .task(id:) replaces the old .onAppear + .onChange combo. .task(id:)
+//    runs when the view appears AND whenever the id changes, which is
+//    exactly what we want for "start listening when we know the clinic."
+//  - Listener teardown on sign-out stays in .onChange(of: isAuthenticated)
+//    — view code (SettingsPlaceholder.signOut) no longer needs to call
+//    stopListening manually.
+//  - #Preview uses AuthManager.preview() so previews don't crash trying
+//    to reach Firebase.
 //
 
 import SwiftUI
@@ -29,27 +38,29 @@ struct RootView: View {
                 LoginView()
             }
         }
-        // ── Start listening when user is loaded ──
-        .onChange(of: authManager.currentUser?.clinicID) { _, clinicID in
-            if let clinicID = clinicID, !clinicID.isEmpty {
+        // ── Inventory listener lifecycle ──
+        //
+        // .task(id:) runs when the view first appears AND whenever the
+        // clinicID changes. This covers:
+        //   - Fresh launch with a cached session (clinicID appears)
+        //   - Sign-in (clinicID goes from nil → "abc123")
+        //   - Clinic switch, if we ever add one (clinicID changes)
+        //
+        // When the id changes, SwiftUI cancels the previous task, so
+        // startListening is safely called exactly once per clinic.
+        //
+        .task(id: authManager.currentUser?.clinicID) {
+            if let clinicID = authManager.currentUser?.clinicID,
+               !clinicID.isEmpty {
                 print("Starting inventory listener for clinic: \(clinicID)")
                 inventoryManager.startListening(clinicID: clinicID)
             }
         }
-        // ── Stop listening on sign out ──
+        // ── Stop listening on sign-out ──
         .onChange(of: authManager.isAuthenticated) { _, isAuth in
             if !isAuth {
                 print("User signed out — stopping listeners")
                 inventoryManager.stopListening()
-            }
-        }
-        // ── Also try on appear (in case onChange missed it) ──
-        .onAppear {
-            if let clinicID = authManager.currentUser?.clinicID,
-               !clinicID.isEmpty,
-               inventoryManager.items.isEmpty {
-                print("onAppear — starting inventory listener")
-                inventoryManager.startListening(clinicID: clinicID)
             }
         }
     }
@@ -86,8 +97,18 @@ struct SplashView: View {
     }
 }
 
-#Preview {
+// ══════════════════════════════════════════════════════
+// MARK: - Preview
+// ══════════════════════════════════════════════════════
+
+#Preview("Splash") {
+    SplashView()
+}
+
+#Preview("Logged Out") {
     RootView()
-        .environmentObject(AuthManager())
+        .environmentObject(AuthManager.preview())
         .environmentObject(InventoryManager())
+        .environmentObject(UserManager())
+        .environmentObject(HCPCSSearchService())
 }

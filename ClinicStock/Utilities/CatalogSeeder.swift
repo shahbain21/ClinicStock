@@ -4,11 +4,25 @@
 //
 //  Created by Mohamed Kaid
 //
+//  FIXES:
+//  - Catalog writes route through DatabaseService.saveCatalogItem.
+//  - HCPCS codes uppercased in the data body (DatabaseService does this
+//    for the doc ID already; normalizing in data prevents drift).
+//  - sourceYear uses the current calendar year, not hardcoded 2026.
+//  - @MainActor on the class — @Published mutations are plain assignments.
+//  - lastError surfaces failure details to the UI.
+//  - reset() lets the UI re-run after completion.
+//
+//  NOTE: The Firestore rules require admin role to create catalog entries.
+//  Make sure the user running this is signed in as an admin, otherwise
+//  every write will fail with a permission-denied error.
+//
 
 import Foundation
 import FirebaseFirestore
 import Combine
 
+@MainActor
 class CatalogSeeder: ObservableObject {
 
     @Published var status: String = "Ready"
@@ -16,62 +30,76 @@ class CatalogSeeder: ObservableObject {
     @Published var isComplete: Bool = false
     @Published var progress: Int = 0
     @Published var total: Int = 0
+    @Published var lastError: String? = nil
 
-    private let db = Firestore.firestore()
+    private let dbService = DatabaseService.shared
+
+    // ══════════════════════════════════════════════════════
+    // MARK: - Reset to initial state
+    // ══════════════════════════════════════════════════════
+
+    func reset() {
+        isSeeding = false
+        isComplete = false
+        progress = 0
+        total = 0
+        lastError = nil
+        status = "Ready"
+    }
 
     // ══════════════════════════════════════════════════════
     // MARK: - Run this ONCE as platform admin
     // ══════════════════════════════════════════════════════
 
     func seedCatalog() async {
-        await MainActor.run {
-            isSeeding = true
-            status = "Building catalog..."
-        }
-        
+        isSeeding = true
+        isComplete = false
+        lastError = nil
+        status = "Building catalog..."
+
         let codes = allDMECodes()
-        
-        await MainActor.run {
-            self.total = codes.count
-            self.progress = 0
-        }
-        
-        await updateStatus("Seeding \(codes.count) DME codes...")
-        
+        total = codes.count
+        progress = 0
+
+        status = "Seeding \(codes.count) DME codes..."
+
         var successCount = 0
         var failCount = 0
-        
+        var firstError: String? = nil
+
         for entry in codes {
-            let code = entry["hcpcsCode"] as? String ?? "unknown"
+            let code = (entry["hcpcsCode"] as? String ?? "unknown").uppercased()
             do {
-                // Use the HCPCS code as the document ID for fast direct lookup
-                try await db.collection("hcpcsCatalog")
-                    .document(code)
-                    .setData(entry, merge: true)
+                var normalized = entry
+                normalized["hcpcsCode"] = code
+                try await dbService.saveCatalogItem(normalized)
                 successCount += 1
             } catch {
-                print("Failed to seed \(code): \(error)")
                 failCount += 1
+                if firstError == nil {
+                    firstError = "\(code): \(error.localizedDescription)"
+                }
+                print("Failed to seed \(code): \(error)")
             }
-            
-            await MainActor.run {
-                self.progress += 1
-            }
+
+            progress += 1
         }
-        
-        await MainActor.run {
-            self.isSeeding = false
-            self.isComplete = true
-            self.status = "Done — \(successCount) codes seeded, \(failCount) failed"
+
+        isSeeding = false
+        isComplete = true
+        status = "Done — \(successCount) codes seeded, \(failCount) failed"
+
+        if let err = firstError {
+            lastError = "First failure: \(err)"
         }
-        
+
         print("Catalog seeding complete: \(successCount) success, \(failCount) failed")
     }
 
     // ══════════════════════════════════════════════════════
     // MARK: - All DME codes
     // Covers E, L, A, K code ranges relevant to clinics.
-    // Clinical names are from 2026 CMS HCPCS Level II.
+    // Clinical names are from current CMS HCPCS Level II.
     // commonNames are plain English terms clinics actually use.
     // ══════════════════════════════════════════════════════
 
@@ -727,22 +755,16 @@ class CatalogSeeder: ObservableObject {
         common: [String],
         category: String
     ) -> [String: Any] {
+        let currentYear = Calendar.current.component(.year, from: Date())
         return [
-            "hcpcsCode": code,
+            "hcpcsCode": code.uppercased(),
             "clinicalName": clinical,
             "commonNames": common,
             "category": category,
             "gtins": [] as [String],
             "isActive": true,
             "lastUpdated": Timestamp(date: Date()),
-            "sourceYear": 2026
+            "sourceYear": currentYear
         ]
-    }
-
-    private func updateStatus(_ message: String) async {
-        await MainActor.run {
-            status = message
-        }
-        print(message)
     }
 }

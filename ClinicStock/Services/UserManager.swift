@@ -4,17 +4,12 @@
 //
 //  Created by Mohamed Shahbain
 //
-//  REWRITTEN: Invitation-based system
-//  - Admin creates invitations, not Auth accounts
-//  - No auto-sign-in problem
-//  - Works with Google/Apple/Email sign-in
-//
-
 import Foundation
 import FirebaseAuth
 import FirebaseFirestore
 import Combine
 
+@MainActor
 class UserManager: ObservableObject {
 
     @Published var clinicUsers: [AppUser] = []
@@ -31,25 +26,18 @@ class UserManager: ObservableObject {
     // ══════════════════════════════════════════════════════
 
     func loadUsers(clinicID: String) async {
-        await MainActor.run { isLoading = true }
+        isLoading = true
+        defer { isLoading = false }
 
         do {
             let users = try await dbService.getClinicUsers(clinicID: clinicID)
-            await MainActor.run {
-                self.clinicUsers = users.sorted {
-                    $0.displayName < $1.displayName
-                }
-            }
+            self.clinicUsers = users.sorted { $0.displayName < $1.displayName }
         } catch {
-            await MainActor.run {
-                self.errorMessage = error.localizedDescription
-            }
+            self.errorMessage = error.localizedDescription
         }
 
         // Also load pending invitations
         await loadInvitations(clinicID: clinicID)
-
-        await MainActor.run { isLoading = false }
     }
 
     // ══════════════════════════════════════════════════════
@@ -58,28 +46,23 @@ class UserManager: ObservableObject {
 
     func loadInvitations(clinicID: String) async {
         do {
-            let snapshot = try await db.collection("invitations")
-                .whereField("clinicID", isEqualTo: clinicID)
-                .whereField("status", isEqualTo: "pending")
-                .getDocuments()
-
-            let invites = snapshot.documents.compactMap {
-                try? $0.data(as: Invitation.self)
-            }
-
-            await MainActor.run {
-                self.pendingInvitations = invites.sorted {
-                    $0.displayName < $1.displayName
-                }
+            let invites = try await dbService.getPendingInvitations(clinicID: clinicID)
+            self.pendingInvitations = invites.sorted {
+                $0.displayName < $1.displayName
             }
         } catch {
             print("Error loading invitations: \(error)")
+            // Surface so admin knows invitations list may be incomplete
+            self.errorMessage = "Could not load invitations: \(error.localizedDescription)"
         }
     }
 
     // ══════════════════════════════════════════════════════
-    // MARK: - Invite user (replaces addUser)
-    // Just saves to Firestore — no Auth account created
+    // MARK: - Invite user
+    //
+    // Just saves to Firestore — no Auth account created. The invitee
+    // signs in later via Email/Google/Apple and their profile is
+    // auto-provisioned via checkAndAcceptInvitation.
     // ══════════════════════════════════════════════════════
 
     func inviteUser(
@@ -94,20 +77,24 @@ class UserManager: ObservableObject {
             throw UserError.insufficientPermissions
         }
 
-        let normalizedEmail = email.lowercased().trimmingCharacters(in: .whitespaces)
-        let displayName = "\(firstName) \(lastName)"
+        // Defensive input validation
+        let trimmedFirst = firstName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedLast = lastName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedEmail = Self.normalizeEmail(email)
 
-        // Check if invitation already exists
-        let existing = try await db.collection("invitations")
-            .document(normalizedEmail)
-            .getDocument()
+        guard !trimmedFirst.isEmpty,
+              !trimmedLast.isEmpty,
+              !normalizedEmail.isEmpty,
+              normalizedEmail.contains("@") else {
+            throw UserError.invalidInput
+        }
 
-        if existing.exists {
-            let data = existing.data()
-            let status = data?["status"] as? String ?? ""
-            if status == "pending" {
-                throw UserError.alreadyInvited
-            }
+        let displayName = "\(trimmedFirst) \(trimmedLast)"
+
+        // Check if invitation already exists and is still pending
+        if let existing = try await dbService.getInvitation(email: normalizedEmail),
+           existing.isPending {
+            throw UserError.alreadyInvited
         }
 
         // Check if user already exists in this clinic
@@ -121,29 +108,26 @@ class UserManager: ObservableObject {
         }
 
         // Create the invitation
-        try await db.collection("invitations")
-            .document(normalizedEmail)
-            .setData([
-                "email": normalizedEmail,
-                "displayName": displayName,
-                "role": role.rawValue,
-                "clinicID": clinicID,
-                "invitedBy": admin.id ?? "",
-                "invitedByName": admin.displayName,
-                "status": "pending",
-                "dateCreated": Timestamp(date: Date()),
-            ])
+        try await dbService.saveInvitation([
+            "email": normalizedEmail,
+            "displayName": displayName,
+            "role": role.rawValue,
+            "clinicID": clinicID,
+            "invitedBy": admin.id ?? "",
+            "invitedByName": admin.displayName,
+            "status": "pending",
+            "dateCreated": Timestamp(date: Date())
+        ], email: normalizedEmail)
 
         print("Invitation created for \(normalizedEmail)")
 
-        // Log it
+        // Audit log
         try await dbService.addLog([
             "itemID": normalizedEmail,
             "itemName": displayName,
             "itemBarcode": "",
             "userID": admin.id ?? "",
             "userName": admin.displayName,
-            "clinicID": clinicID,
             "action": "userCreated",
             "details": "Invited \(displayName) as \(role.displayName)",
             "previousValue": "",
@@ -151,16 +135,27 @@ class UserManager: ObservableObject {
             "timestamp": Timestamp(date: Date())
         ], clinicID: clinicID)
 
-        await MainActor.run {
-            self.successMessage = "Invitation sent! Tell \(firstName) to download the app and sign in with \(normalizedEmail)."
-        }
+        self.successMessage = "Invitation sent! Tell \(trimmedFirst) to download the app and sign in with \(normalizedEmail)."
 
         await loadUsers(clinicID: clinicID)
     }
 
     // ══════════════════════════════════════════════════════
     // MARK: - Check & accept invitation
-    // Called after ANY sign-in (email, Google, Apple)
+    //
+    // Called by AuthManager during profile loading, for ANY sign-in
+    // method (email, Google, Apple). Static because it's called before
+    // any UserManager instance exists — from AuthManager's auth listener.
+    //
+    // TRUST BOUNDARY: Assumes `uid` and `email` came from Firebase Auth
+    // (i.e., the caller has verified ownership of the email). A caller
+    // passing arbitrary values here would create a profile for that uid
+    // with whatever role the invitation specifies.
+    //
+    // ATOMICITY: The profile-create and invitation-accept writes commit
+    // as a single WriteBatch. Previously these were two separate writes;
+    // a failure between them would leave the invitation pending forever
+    // while the user had a working profile.
     // ══════════════════════════════════════════════════════
 
     static func checkAndAcceptInvitation(
@@ -168,10 +163,13 @@ class UserManager: ObservableObject {
         email: String,
         displayName: String
     ) async -> Bool {
+        let normalizedEmail = normalizeEmail(email)
+        guard !normalizedEmail.isEmpty else { return false }
+
         let db = Firestore.firestore()
-        let normalizedEmail = email.lowercased().trimmingCharacters(in: .whitespaces)
 
         do {
+            // Fetch the invitation
             let inviteDoc = try await db.collection("invitations")
                 .document(normalizedEmail)
                 .getDocument()
@@ -184,11 +182,16 @@ class UserManager: ObservableObject {
                 return false
             }
 
-            // Use the invitation's display name if available
+            // Use the invitation's display name if it has one
             let inviteName = data["displayName"] as? String ?? displayName
 
-            // Create the user profile
-            try await db.collection("users").document(uid).setData([
+            // Atomic: create profile + mark invitation accepted in one batch
+            let userRef = db.collection("users").document(uid)
+            let inviteRef = db.collection("invitations").document(normalizedEmail)
+
+            let batch = db.batch()
+
+            batch.setData([
                 "email": normalizedEmail,
                 "displayName": inviteName,
                 "role": role,
@@ -197,16 +200,15 @@ class UserManager: ObservableObject {
                 "isActive": true,
                 "lastLogin": Timestamp(date: Date()),
                 "dateCreated": Timestamp(date: Date())
-            ])
+            ], forDocument: userRef)
 
-            // Mark invitation as accepted
-            try await db.collection("invitations")
-                .document(normalizedEmail)
-                .updateData([
-                    "status": "accepted",
-                    "dateAccepted": Timestamp(date: Date()),
-                    "acceptedUID": uid
-                ])
+            batch.updateData([
+                "status": "accepted",
+                "dateAccepted": Timestamp(date: Date()),
+                "acceptedUID": uid
+            ], forDocument: inviteRef)
+
+            try await batch.commit()
 
             print("Invitation accepted: \(normalizedEmail) → \(uid)")
             return true
@@ -230,13 +232,29 @@ class UserManager: ObservableObject {
             throw UserError.insufficientPermissions
         }
 
-        let normalizedEmail = email.lowercased()
+        let normalizedEmail = Self.normalizeEmail(email)
 
-        try await db.collection("invitations")
-            .document(normalizedEmail)
-            .delete()
+        // Capture the invitation's display name before deleting, for the log
+        let invitation = try await dbService.getInvitation(email: normalizedEmail)
+        let inviteeName = invitation?.displayName ?? normalizedEmail
+
+        try await dbService.deleteInvitation(email: normalizedEmail)
 
         print("Invitation cancelled: \(normalizedEmail)")
+
+        // Audit log — previously missing
+        try await dbService.addLog([
+            "itemID": normalizedEmail,
+            "itemName": inviteeName,
+            "itemBarcode": "",
+            "userID": admin.id ?? "",
+            "userName": admin.displayName,
+            "action": "userUpdated",
+            "details": "Cancelled invitation for \(inviteeName)",
+            "previousValue": "pending",
+            "newValue": "cancelled",
+            "timestamp": Timestamp(date: Date())
+        ], clinicID: clinicID)
 
         await loadUsers(clinicID: clinicID)
     }
@@ -255,12 +273,15 @@ class UserManager: ObservableObject {
             throw UserError.insufficientPermissions
         }
 
+        // Fetch fresh — don't rely on local cache which may be stale/empty
+        let targetUser = try await dbService.getUser(userID: userID)
+        let userName = targetUser?.displayName ?? "Unknown"
+        let previousRole = targetUser?.role.rawValue ?? ""
+
         try await dbService.updateUser(
             userID: userID,
             data: ["role": newRole.rawValue]
         )
-
-        let userName = clinicUsers.first(where: { $0.id == userID })?.displayName ?? "Unknown"
 
         try await dbService.addLog([
             "itemID": userID,
@@ -268,10 +289,9 @@ class UserManager: ObservableObject {
             "itemBarcode": "",
             "userID": admin.id ?? "",
             "userName": admin.displayName,
-            "clinicID": clinicID,
             "action": "userUpdated",
             "details": "Changed \(userName)'s role to \(newRole.displayName)",
-            "previousValue": "",
+            "previousValue": previousRole,
             "newValue": newRole.rawValue,
             "timestamp": Timestamp(date: Date())
         ], clinicID: clinicID)
@@ -292,12 +312,14 @@ class UserManager: ObservableObject {
             throw UserError.insufficientPermissions
         }
 
+        // Fetch fresh
+        let targetUser = try await dbService.getUser(userID: userID)
+        let userName = targetUser?.displayName ?? "Unknown"
+
         try await dbService.updateUser(
             userID: userID,
             data: ["isActive": false]
         )
-
-        let userName = clinicUsers.first(where: { $0.id == userID })?.displayName ?? "Unknown"
 
         try await dbService.addLog([
             "itemID": userID,
@@ -305,7 +327,6 @@ class UserManager: ObservableObject {
             "itemBarcode": "",
             "userID": admin.id ?? "",
             "userName": admin.displayName,
-            "clinicID": clinicID,
             "action": "userUpdated",
             "details": "Deactivated \(userName)",
             "previousValue": "active",
@@ -329,12 +350,38 @@ class UserManager: ObservableObject {
             throw UserError.insufficientPermissions
         }
 
+        let targetUser = try await dbService.getUser(userID: userID)
+        let userName = targetUser?.displayName ?? "Unknown"
+
         try await dbService.updateUser(
             userID: userID,
             data: ["isActive": true]
         )
 
+        // Log reactivation for audit completeness (previously unlogged)
+        try await dbService.addLog([
+            "itemID": userID,
+            "itemName": userName,
+            "itemBarcode": "",
+            "userID": admin.id ?? "",
+            "userName": admin.displayName,
+            "action": "userUpdated",
+            "details": "Reactivated \(userName)",
+            "previousValue": "inactive",
+            "newValue": "active",
+            "timestamp": Timestamp(date: Date())
+        ], clinicID: clinicID)
+
         await loadUsers(clinicID: clinicID)
+    }
+
+    // ══════════════════════════════════════════════════════
+    // MARK: - Helpers
+    // ══════════════════════════════════════════════════════
+
+    /// Shared email normalizer used by both instance and static methods.
+    static func normalizeEmail(_ email: String) -> String {
+        return email.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
     }
 
     // ══════════════════════════════════════════════════════
@@ -346,6 +393,7 @@ class UserManager: ObservableObject {
         case userNotFound
         case alreadyInvited
         case alreadyExists
+        case invalidInput
 
         var errorDescription: String? {
             switch self {
@@ -357,27 +405,9 @@ class UserManager: ObservableObject {
                 return "This email already has a pending invitation."
             case .alreadyExists:
                 return "A user with this email already exists in your clinic."
+            case .invalidInput:
+                return "Please enter a first name, last name, and valid email."
             }
         }
-    }
-}
-
-// ══════════════════════════════════════════════════════
-// MARK: - Invitation Model
-// ══════════════════════════════════════════════════════
-
-struct Invitation: Codable, Identifiable {
-    @DocumentID var id: String?
-    var email: String
-    var displayName: String
-    var role: String
-    var clinicID: String
-    var invitedBy: String
-    var invitedByName: String
-    var status: String
-    var dateCreated: Date
-
-    var roleEnum: AppUser.UserRole {
-        AppUser.UserRole(rawValue: role) ?? .staff
     }
 }

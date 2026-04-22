@@ -4,10 +4,11 @@
 //
 //  Created by Mohamed Shahbain on 3/30/26.
 //
-//  UPDATED:
-//  - Added Google Sign-In support
-//  - Added UserManager
-//  - Added HCPCSSearchService
+//  FIXES:
+//  - UserManager uncommented and injected as an environment object so
+//    every view shares one instance (previously UserManagementView created
+//    its own private instance, which meant no cache reuse and no way for
+//    other views — e.g. the dashboard — to read user/invitation state).
 //
 
 import SwiftUI
@@ -26,7 +27,7 @@ class AppDelegate: NSObject, UIApplicationDelegate {
             GIDSignIn.sharedInstance.configuration = GIDConfiguration(clientID: clientID)
             print("Google Sign-In configured with client ID")
         } else {
-            print("No client ID found — check GoogleService-Info.plist")
+            assertionFailure("No Google client ID found — check GoogleService-Info.plist")
         }
 
         return true
@@ -47,7 +48,7 @@ struct ClinicStockApp: App {
 
     @StateObject private var authManager = AuthManager()
     @StateObject private var inventoryManager = InventoryManager()
-    //@StateObject private var userManager = UserManager()
+    @StateObject private var userManager = UserManager()
     @StateObject private var searchService = HCPCSSearchService()
 
     var body: some Scene {
@@ -55,7 +56,7 @@ struct ClinicStockApp: App {
             RootView()
                 .environmentObject(authManager)
                 .environmentObject(inventoryManager)
-                //.environmentObject(userManager)
+                .environmentObject(userManager)
                 .environmentObject(searchService)
                 .onOpenURL { url in
                     GIDSignIn.sharedInstance.handle(url)

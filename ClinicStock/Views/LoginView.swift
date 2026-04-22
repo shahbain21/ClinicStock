@@ -4,11 +4,13 @@
 //
 //  Created by Mohamed Shahbain on 4/14/26.
 //
-//  UPDATED:
-//  - Dark mode support
-//  - Apple button adapts to color scheme
-//  - Google button adapts to color scheme
-//  - Registration sheet wired
+//  FIXES:
+//  - Registration sheet wired up to the new RegistrationView.
+//  - Remembered-email persistence via authManager.rememberEmail/forgetEmail
+//    instead of raw UserDefaults with a magic string.
+//  - Email normalization happens inside AuthManager now, so the view
+//    doesn't need to trim/lowercase before passing through.
+//  - Preview uses AuthManager.preview().
 //
 
 import SwiftUI
@@ -24,18 +26,16 @@ struct LoginView: View {
     @State private var rememberMe = false
     @State private var showForgotPassword = false
     @State private var showRegistration = false
+    @State private var showJoinClinic = false
     @State private var isSigningIn = false
     @State private var isSocialSigningIn = false
-    @State private var showJoinClinic = false
-
 
     var body: some View {
         NavigationStack {
             ScrollView {
                 VStack(spacing: 0) {
 
-                    Spacer()
-                        .frame(height: 80)
+                    Spacer().frame(height: 80)
 
                     // ── Header ──
                     VStack(spacing: AppSpacing.sm) {
@@ -142,7 +142,6 @@ struct LoginView: View {
                     // ── Social Sign-In Buttons ──
                     VStack(spacing: AppSpacing.md) {
 
-                        // Apple Sign-In — adapts style to color scheme
                         SignInWithAppleButton(.signIn) { request in
                             let appleRequest = authManager.createAppleSignInRequest()
                             request.requestedScopes = appleRequest.requestedScopes
@@ -156,16 +155,12 @@ struct LoginView: View {
                         .frame(height: 50)
                         .cornerRadius(AppRadius.medium)
 
-                        // Google Sign-In — adapts to color scheme
                         Button(action: signInWithGoogle) {
                             HStack(spacing: AppSpacing.md) {
-                                Image(systemName: "g.circle.fill")
-                                    .font(.system(size: 20))
-                                    .foregroundColor(
-                                        colorScheme == .dark
-                                            ? .white
-                                            : .red
-                                    )
+                                Image("googleLogo")
+                                    .resizable()
+                                    .scaledToFit()
+                                    .frame(width: 20, height: 20)
 
                                 Text("Sign in with Google")
                                     .font(AppFonts.bodySemibold)
@@ -187,7 +182,6 @@ struct LoginView: View {
                     .padding(.horizontal, AppSpacing.xxl)
                     .padding(.top, AppSpacing.xl)
 
-                    // ── Loading indicator for social sign-in ──
                     if isSocialSigningIn {
                         HStack(spacing: AppSpacing.sm) {
                             ProgressView()
@@ -201,8 +195,7 @@ struct LoginView: View {
                         .padding(.top, AppSpacing.lg)
                     }
 
-                    Spacer()
-                        .frame(height: AppSpacing.huge)
+                    Spacer().frame(height: AppSpacing.huge)
 
                     // ── Bottom Links ──
                     VStack(spacing: AppSpacing.md) {
@@ -242,10 +235,10 @@ struct LoginView: View {
                 ForgotPasswordView()
                     .environmentObject(authManager)
             }
-//            .sheet(isPresented: $showRegistration) {
-//                //RegistrationView()
-//                    //.environmentObject(authManager)
-//            }
+            .sheet(isPresented: $showRegistration) {
+                RegistrationView()
+                    .environmentObject(authManager)
+            }
             .sheet(isPresented: $showJoinClinic) {
                 JoinClinicView()
                     .environmentObject(authManager)
@@ -257,7 +250,7 @@ struct LoginView: View {
     }
 
     // ══════════════════════════════════════════════════════
-    // MARK: - Actions
+    // MARK: - Validation
     // ══════════════════════════════════════════════════════
 
     private var isFormValid: Bool {
@@ -265,6 +258,10 @@ struct LoginView: View {
         !password.isEmpty &&
         email.contains("@")
     }
+
+    // ══════════════════════════════════════════════════════
+    // MARK: - Actions
+    // ══════════════════════════════════════════════════════
 
     private func loadSavedEmail() {
         if let saved = authManager.savedEmail {
@@ -275,67 +272,48 @@ struct LoginView: View {
 
     private func signIn() {
         isSigningIn = true
-        authManager.errorMessage = nil
 
         Task {
             do {
-                try await authManager.signIn(
-                    email: email.trimmingCharacters(in: .whitespaces),
-                    password: password
-                )
+                try await authManager.signIn(email: email, password: password)
 
+                // Persist email preference via the manager
                 if rememberMe {
-                    UserDefaults.standard.set(email, forKey: "savedEmail")
+                    authManager.rememberEmail(email)
                 } else {
-                    UserDefaults.standard.removeObject(forKey: "savedEmail")
+                    authManager.forgetEmail()
                 }
             } catch {
-                await MainActor.run {
-                    authManager.errorMessage = error.localizedDescription
-                }
+                authManager.errorMessage = error.localizedDescription
             }
 
-            await MainActor.run {
-                isSigningIn = false
-            }
+            isSigningIn = false
         }
     }
 
     private func signInWithGoogle() {
         isSocialSigningIn = true
-        authManager.errorMessage = nil
 
         Task {
             do {
                 try await authManager.signInWithGoogle()
             } catch {
-                await MainActor.run {
-                    authManager.errorMessage = error.localizedDescription
-                }
+                authManager.errorMessage = error.localizedDescription
             }
-
-            await MainActor.run {
-                isSocialSigningIn = false
-            }
+            isSocialSigningIn = false
         }
     }
 
     private func handleAppleSignIn(result: Result<ASAuthorization, Error>) {
         isSocialSigningIn = true
-        authManager.errorMessage = nil
 
         Task {
             do {
                 try await authManager.handleAppleSignIn(result: result)
             } catch {
-                await MainActor.run {
-                    authManager.errorMessage = error.localizedDescription
-                }
+                authManager.errorMessage = error.localizedDescription
             }
-
-            await MainActor.run {
-                isSocialSigningIn = false
-            }
+            isSocialSigningIn = false
         }
     }
 }
@@ -346,5 +324,5 @@ struct LoginView: View {
 
 #Preview {
     LoginView()
-        .environmentObject(AuthManager())
+        .environmentObject(AuthManager.preview())
 }

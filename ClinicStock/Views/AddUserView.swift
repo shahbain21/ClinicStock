@@ -4,8 +4,19 @@
 //
 //  Created by Mohamed Shahbain
 //
-//  REWRITTEN: Creates an invitation instead of an Auth account.
-//  Admin stays signed in. No password reset needed.
+//  Creates an invitation instead of an Auth account. Admin stays
+//  signed in. No password reset needed.
+//
+//  FIXES:
+//  - userManager is now an @EnvironmentObject instead of a passed-in
+//    @ObservedObject. Matches the app-wide pattern.
+//  - Redundant view-side trimming removed — UserManager.inviteUser
+//    already normalizes inputs.
+//  - Cancel button uses plain style instead of DangerButtonStyle;
+//    cancelling an invitation form isn't a destructive action.
+//  - errorMessage cleared on both appear and disappear to keep shared
+//    state clean for other consumers.
+//  - Preview uses AuthManager.preview() and shared environment.
 //
 
 import SwiftUI
@@ -13,7 +24,7 @@ import SwiftUI
 struct AddUserView: View {
 
     @EnvironmentObject var authManager: AuthManager
-    @ObservedObject var userManager: UserManager
+    @EnvironmentObject var userManager: UserManager
     @Environment(\.dismiss) private var dismiss
 
     @State private var firstName = ""
@@ -58,74 +69,7 @@ struct AddUserView: View {
                             keyboardType: .emailAddress
                         )
 
-                        // ── Role Picker ──
-                        VStack(alignment: .leading, spacing: AppSpacing.xs) {
-                            Text("Role")
-                                .font(AppFonts.captionMedium)
-                                .foregroundColor(AppColors.textSecondary)
-
-                            Button(action: {
-                                withAnimation(.easeOut(duration: 0.2)) {
-                                    showRolePicker.toggle()
-                                }
-                            }) {
-                                HStack {
-                                    RoleBadge(role: selectedRole)
-                                    Spacer()
-                                    Image(systemName: showRolePicker ? "chevron.up" : "chevron.down")
-                                        .font(.system(size: 14))
-                                        .foregroundColor(AppColors.textTertiary)
-                                }
-                                .padding(.horizontal, AppSpacing.lg)
-                                .frame(height: 48)
-                                .background(
-                                    RoundedRectangle(cornerRadius: AppRadius.medium)
-                                        .fill(AppColors.inputBackground)
-                                )
-                                .overlay(
-                                    RoundedRectangle(cornerRadius: AppRadius.medium)
-                                        .stroke(AppColors.border, lineWidth: 1)
-                                )
-                            }
-                            .buttonStyle(.plain)
-
-                            if showRolePicker {
-                                VStack(spacing: 0) {
-                                    ForEach(availableRoles, id: \.self) { role in
-                                        Button(action: {
-                                            selectedRole = role
-                                            withAnimation { showRolePicker = false }
-                                        }) {
-                                            HStack {
-                                                RoleBadge(role: role)
-                                                Spacer()
-                                                Text(roleDescription(role))
-                                                    .font(AppFonts.footnote)
-                                                    .foregroundColor(AppColors.textTertiary)
-                                                if role == selectedRole {
-                                                    Image(systemName: "checkmark")
-                                                        .font(.system(size: 14, weight: .semibold))
-                                                        .foregroundColor(AppColors.accent)
-                                                }
-                                            }
-                                            .padding(.horizontal, AppSpacing.lg)
-                                            .padding(.vertical, AppSpacing.md)
-                                        }
-                                        .buttonStyle(.plain)
-
-                                        if role != availableRoles.last {
-                                            Divider().padding(.horizontal, AppSpacing.lg)
-                                        }
-                                    }
-                                }
-                                .background(
-                                    RoundedRectangle(cornerRadius: AppRadius.medium)
-                                        .fill(AppColors.cardBackground)
-                                )
-                                .cardShadow()
-                                .transition(.opacity.combined(with: .move(edge: .top)))
-                            }
-                        }
+                        rolePicker
                     }
                     .padding(.horizontal, AppSpacing.xxl)
 
@@ -169,7 +113,7 @@ struct AddUserView: View {
                                         CircularProgressViewStyle(tint: .white)
                                     )
                             } else {
-                                Text("Add")
+                                Text("Send Invitation")
                             }
                         }
                         .buttonStyle(PrimaryButtonStyle(isDisabled: !isFormValid))
@@ -177,8 +121,12 @@ struct AddUserView: View {
 
                         Button(action: { dismiss() }) {
                             Text("Cancel")
+                                .font(AppFonts.bodySemibold)
+                                .foregroundColor(AppColors.textSecondary)
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, AppSpacing.md)
                         }
-                        .buttonStyle(DangerButtonStyle())
+                        .buttonStyle(.plain)
                     }
                     .padding(.horizontal, AppSpacing.xxl)
                     .padding(.bottom, AppSpacing.xxxl)
@@ -204,11 +152,92 @@ struct AddUserView: View {
                 userManager.errorMessage = nil
                 userManager.successMessage = nil
             }
+            .onDisappear {
+                // Clear shared state so other views don't inherit stale
+                // messages from this admin flow.
+                userManager.errorMessage = nil
+                userManager.successMessage = nil
+            }
         }
     }
 
     // ══════════════════════════════════════════════════════
-    // MARK: - Validation
+    // MARK: - Role Picker
+    // ══════════════════════════════════════════════════════
+
+    private var rolePicker: some View {
+        VStack(alignment: .leading, spacing: AppSpacing.xs) {
+            Text("Role")
+                .font(AppFonts.captionMedium)
+                .foregroundColor(AppColors.textSecondary)
+
+            Button(action: {
+                withAnimation(.easeOut(duration: 0.2)) {
+                    showRolePicker.toggle()
+                }
+            }) {
+                HStack {
+                    RoleBadge(role: selectedRole)
+                    Spacer()
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 14))
+                        .foregroundColor(AppColors.textTertiary)
+                        .rotationEffect(.degrees(showRolePicker ? 180 : 0))
+                }
+                .padding(.horizontal, AppSpacing.lg)
+                .frame(height: 48)
+                .background(
+                    RoundedRectangle(cornerRadius: AppRadius.medium)
+                        .fill(AppColors.inputBackground)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: AppRadius.medium)
+                        .stroke(AppColors.border, lineWidth: 1)
+                )
+            }
+            .buttonStyle(.plain)
+
+            if showRolePicker {
+                VStack(spacing: 0) {
+                    ForEach(availableRoles, id: \.self) { role in
+                        Button(action: {
+                            selectedRole = role
+                            withAnimation { showRolePicker = false }
+                        }) {
+                            HStack {
+                                RoleBadge(role: role)
+                                Spacer()
+                                Text(roleDescription(role))
+                                    .font(AppFonts.footnote)
+                                    .foregroundColor(AppColors.textTertiary)
+                                if role == selectedRole {
+                                    Image(systemName: "checkmark")
+                                        .font(.system(size: 14, weight: .semibold))
+                                        .foregroundColor(AppColors.accent)
+                                }
+                            }
+                            .padding(.horizontal, AppSpacing.lg)
+                            .padding(.vertical, AppSpacing.md)
+                        }
+                        .buttonStyle(.plain)
+
+                        if role != availableRoles.last {
+                            Divider().padding(.horizontal, AppSpacing.lg)
+                        }
+                    }
+                }
+                .background(
+                    RoundedRectangle(cornerRadius: AppRadius.medium)
+                        .fill(AppColors.cardBackground)
+                )
+                .cardShadow()
+                .transition(.opacity.combined(with: .move(edge: .top)))
+            }
+        }
+    }
+
+    // ══════════════════════════════════════════════════════
+    // MARK: - Validation / Role Helpers
     // ══════════════════════════════════════════════════════
 
     private var isFormValid: Bool {
@@ -244,36 +273,37 @@ struct AddUserView: View {
         Task {
             do {
                 try await userManager.inviteUser(
-                    firstName: firstName.trimmingCharacters(in: .whitespaces),
-                    lastName: lastName.trimmingCharacters(in: .whitespaces),
-                    email: email.trimmingCharacters(in: .whitespaces),
+                    firstName: firstName,
+                    lastName: lastName,
+                    email: email,
                     role: selectedRole,
                     clinicID: currentUser.clinicID,
                     by: currentUser
                 )
-
-                await MainActor.run {
-                    showSuccess = true
-                    isAdding = false
-                }
+                showSuccess = true
+                isAdding = false
             } catch {
-                await MainActor.run {
-                    userManager.errorMessage = error.localizedDescription
-                    isAdding = false
-                }
+                userManager.errorMessage = error.localizedDescription
+                isAdding = false
             }
         }
     }
 }
 
+// ══════════════════════════════════════════════════════
+// MARK: - Preview
+// ══════════════════════════════════════════════════════
+
 #Preview("Light") {
-    AddUserView(userManager: UserManager())
-        .environmentObject(AuthManager())
+    AddUserView()
+        .environmentObject(AuthManager.preview())
+        .environmentObject(UserManager())
         .preferredColorScheme(.light)
 }
 
 #Preview("Dark") {
-    AddUserView(userManager: UserManager())
-        .environmentObject(AuthManager())
+    AddUserView()
+        .environmentObject(AuthManager.preview())
+        .environmentObject(UserManager())
         .preferredColorScheme(.dark)
 }

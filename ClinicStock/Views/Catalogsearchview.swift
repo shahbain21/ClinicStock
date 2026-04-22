@@ -2,14 +2,25 @@
 //  CatalogSearchView.swift
 //  ClinicStock
 //
+//  Search + scanner for the HCPCS catalog. Reference-lookup interface
+//  for "what is this thing?" — the fast checkout flow lives in the
+//  Scan tab (ScanTabView) instead.
+//
+//  First workflow: type a name to find an item. Second: scan a barcode
+//  that resolves to a catalog entry. Third: scan a barcode NOT in the
+//  catalog yet, then search by name and tap a result to link the
+//  scanned GTIN to that HCPCS code (self-improving catalog).
+//
+//  The BarcodeScannerView and ScannerViewController classes now live in
+//  BarcodeScanner.swift so both this view and ScanTabView can share them.
 //
 
 import SwiftUI
-import AVFoundation
 
 struct CatalogSearchView: View {
 
-    @StateObject private var searchService = HCPCSSearchService()
+    @EnvironmentObject var searchService: HCPCSSearchService
+
     @State private var searchText = ""
     @State private var showScanner = false
     @State private var selectedItem: HCPCSCatalogItem? = nil
@@ -19,9 +30,17 @@ struct CatalogSearchView: View {
     @State private var pendingGTIN: String? = nil
     @State private var showGTINConfirmation = false
 
+    // Unrecognized-barcode feedback
+    @State private var showUnrecognizedAlert = false
+
     var body: some View {
         NavigationStack {
             VStack(spacing: 0) {
+
+                // ── Pending GTIN banner ──
+                if let gtin = pendingGTIN {
+                    pendingGTINBanner(gtin: gtin)
+                }
 
                 // ── Search bar + scan button ──
                 HStack(spacing: 12) {
@@ -30,19 +49,19 @@ struct CatalogSearchView: View {
                             .foregroundColor(.secondary)
                         TextField("Search by name or HCPCS code...", text: $searchText)
                             .autocorrectionDisabled()
-                            .autocapitalization(.none)
+                            .textInputAutocapitalization(.never)
                             .onChange(of: searchText) { _, newValue in
                                 searchTask?.cancel()
                                 searchTask = Task {
                                     try? await Task.sleep(nanoseconds: 300_000_000)
                                     guard !Task.isCancelled else { return }
-                                    await searchService.search(query: newValue)
+                                    searchService.search(query: newValue)
                                 }
                             }
                         if !searchText.isEmpty {
                             Button {
                                 searchText = ""
-                                searchService.results = []
+                                searchService.clearResults()
                             } label: {
                                 Image(systemName: "xmark.circle.fill")
                                     .foregroundColor(.secondary)
@@ -77,58 +96,7 @@ struct CatalogSearchView: View {
                 }
 
                 // ── Results ──
-                if searchService.isSearching {
-                    Spacer()
-                    ProgressView("Searching...")
-                    Spacer()
-                } else if searchText.isEmpty {
-                    Spacer()
-                    VStack(spacing: 12) {
-                        Image(systemName: "barcode.viewfinder")
-                            .font(.system(size: 50))
-                            .foregroundColor(.secondary.opacity(0.5))
-                        Text("Search by name or scan a barcode")
-                            .foregroundColor(.secondary)
-                            .font(.subheadline)
-                        Text("\(searchService.isLoaded ? "96" : "...") items in catalog")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    }
-                    Spacer()
-                } else if searchService.results.isEmpty {
-                    Spacer()
-                    VStack(spacing: 12) {
-                        Image(systemName: "magnifyingglass")
-                            .font(.system(size: 40))
-                            .foregroundColor(.secondary.opacity(0.5))
-                        Text("No results for \"\(searchText)\"")
-                            .foregroundColor(.secondary)
-                        Text("Try a different name or scan the barcode")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    }
-                    Spacer()
-                } else {
-                    List(searchService.results, id: \.hcpcsCode) { item in
-                        Button {
-                            // If we have a pending GTIN, save it to this item
-                            if let gtin = pendingGTIN {
-                                Task {
-                                    await searchService.confirmAndSaveGTIN(
-                                        gtin: gtin,
-                                        forItem: item
-                                    )
-                                    pendingGTIN = nil
-                                }
-                            }
-                            selectedItem = item
-                        } label: {
-                            CatalogResultRow(item: item)
-                        }
-                        .buttonStyle(.plain)
-                    }
-                    .listStyle(.plain)
-                }
+                resultsContent
             }
             .navigationTitle("DME Catalog")
             .navigationBarTitleDisplayMode(.large)
@@ -138,33 +106,16 @@ struct CatalogSearchView: View {
                 BarcodeScannerView { scannedValue in
                     showScanner = false
                     Task {
-                        let result = await searchService.lookupBarcode(scannedValue)
-                        switch result {
-                        case .found(let item, _):
-                            // Direct match — show item immediately
-                            selectedItem = item
-
-                        case .gtinNotFound(let gtin, _):
-                            // GTIN not in catalog — save it pending confirmation
-                            // Show search so staff can find and confirm the item
-                            pendingGTIN = gtin
-                            showGTINConfirmation = true
-
-                        case .unrecognized:
-                            // Barcode format not recognized
-                            searchText = ""
-                            searchService.results = []
-                        }
+                        await handleScan(value: scannedValue)
                     }
                 }
             }
 
-            // ── GTIN confirmation banner ──
+            // ── GTIN confirmation alert ──
             .alert("Item Not Recognized", isPresented: $showGTINConfirmation) {
                 Button("Search for it") {
-                    // Clear search so staff can type the item name
                     searchText = ""
-                    searchService.results = []
+                    searchService.clearResults()
                 }
                 Button("Cancel", role: .cancel) {
                     pendingGTIN = nil
@@ -173,10 +124,139 @@ struct CatalogSearchView: View {
                 Text("This barcode isn't in the catalog yet. Search for the item by name and tap it to link this barcode automatically.")
             }
 
+            // ── Unrecognized barcode alert ──
+            .alert("Barcode Not Recognized", isPresented: $showUnrecognizedAlert) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text("The scanned code isn't a valid HCPCS or product barcode. Try again or search by name.")
+            }
+
             // ── Item detail ──
             .sheet(item: $selectedItem) { item in
                 CatalogItemDetailView(item: item)
             }
+        }
+    }
+
+    // ══════════════════════════════════════════════════════
+    // MARK: - Subviews
+    // ══════════════════════════════════════════════════════
+
+    @ViewBuilder
+    private var resultsContent: some View {
+        if searchService.isSearching {
+            Spacer()
+            ProgressView("Searching...")
+            Spacer()
+        } else if searchText.isEmpty {
+            Spacer()
+            VStack(spacing: 12) {
+                Image(systemName: "barcode.viewfinder")
+                    .font(.system(size: 50))
+                    .foregroundColor(.secondary.opacity(0.5))
+                Text("Search by name or scan a barcode")
+                    .foregroundColor(.secondary)
+                    .font(.subheadline)
+                Text(catalogSizeLabel)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+            Spacer()
+        } else if searchService.results.isEmpty {
+            Spacer()
+            VStack(spacing: 12) {
+                Image(systemName: "magnifyingglass")
+                    .font(.system(size: 40))
+                    .foregroundColor(.secondary.opacity(0.5))
+                Text("No results for \"\(searchText)\"")
+                    .foregroundColor(.secondary)
+                Text("Try a different name or scan the barcode")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+            Spacer()
+        } else {
+            List(searchService.results, id: \.hcpcsCode) { item in
+                Button {
+                    selectResult(item)
+                } label: {
+                    CatalogResultRow(item: item)
+                }
+                .buttonStyle(.plain)
+            }
+            .listStyle(.plain)
+        }
+    }
+
+    private func pendingGTINBanner(gtin: String) -> some View {
+        HStack(alignment: .top, spacing: 12) {
+            Image(systemName: "link.circle.fill")
+                .foregroundColor(.orange)
+                .font(.system(size: 18))
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Linking barcode \(gtin)")
+                    .font(.footnote.weight(.semibold))
+                Text("Tap an item below to link this barcode to it")
+                    .font(.footnote)
+                    .foregroundColor(.secondary)
+            }
+
+            Spacer()
+
+            Button("Cancel") {
+                pendingGTIN = nil
+            }
+            .font(.footnote.weight(.semibold))
+            .foregroundColor(.orange)
+        }
+        .padding(12)
+        .background(Color.orange.opacity(0.12))
+        .overlay(
+            Rectangle()
+                .fill(Color.orange.opacity(0.3))
+                .frame(height: 1),
+            alignment: .bottom
+        )
+    }
+
+    // ══════════════════════════════════════════════════════
+    // MARK: - Computed
+    // ══════════════════════════════════════════════════════
+
+    private var catalogSizeLabel: String {
+        if searchService.isLoaded {
+            return "\(searchService.catalogSize) items in catalog"
+        }
+        return "..."
+    }
+
+    // ══════════════════════════════════════════════════════
+    // MARK: - Actions
+    // ══════════════════════════════════════════════════════
+
+    private func selectResult(_ item: HCPCSCatalogItem) {
+        if let gtin = pendingGTIN {
+            Task {
+                await searchService.confirmAndSaveGTIN(gtin: gtin, forItem: item)
+                pendingGTIN = nil
+            }
+        }
+        selectedItem = item
+    }
+
+    private func handleScan(value: String) async {
+        let result = await searchService.lookupBarcode(value)
+        switch result {
+        case .found(let item, _):
+            selectedItem = item
+
+        case .gtinNotFound(let gtin, _):
+            pendingGTIN = gtin
+            showGTINConfirmation = true
+
+        case .unrecognized:
+            showUnrecognizedAlert = true
         }
     }
 }
@@ -277,175 +357,10 @@ struct CatalogItemDetailView: View {
 }
 
 // ══════════════════════════════════════════════════════
-// MARK: - Barcode Scanner
+// MARK: - Preview
 // ══════════════════════════════════════════════════════
 
-struct BarcodeScannerView: UIViewControllerRepresentable {
-    let onScan: (String) -> Void
-
-    func makeUIViewController(context: Context) -> ScannerViewController {
-        let vc = ScannerViewController()
-        vc.onScan = onScan
-        return vc
-    }
-
-    func updateUIViewController(_ uiViewController: ScannerViewController, context: Context) {}
-}
-
-class ScannerViewController: UIViewController, AVCaptureMetadataOutputObjectsDelegate {
-
-    var onScan: ((String) -> Void)?
-    private var captureSession: AVCaptureSession?
-    private var previewLayer: AVCaptureVideoPreviewLayer?
-    private var hasScanned = false
-
-    override func viewDidLoad() {
-        super.viewDidLoad()
-        view.backgroundColor = .black
-        setupCamera()
-        addOverlay()
-    }
-
-    override func viewWillAppear(_ animated: Bool) {
-        super.viewWillAppear(animated)
-        hasScanned = false
-        DispatchQueue.global(qos: .userInitiated).async {
-            self.captureSession?.startRunning()
-        }
-    }
-
-    override func viewWillDisappear(_ animated: Bool) {
-        super.viewWillDisappear(animated)
-        captureSession?.stopRunning()
-    }
-
-    private func setupCamera() {
-        captureSession = AVCaptureSession()
-
-        guard let device = AVCaptureDevice.default(for: .video),
-              let input = try? AVCaptureDeviceInput(device: device),
-              captureSession?.canAddInput(input) == true
-        else {
-            showCameraError()
-            return
-        }
-
-        captureSession?.addInput(input)
-
-        let output = AVCaptureMetadataOutput()
-        guard captureSession?.canAddOutput(output) == true else { return }
-        captureSession?.addOutput(output)
-
-        output.setMetadataObjectsDelegate(self, queue: .main)
-        output.metadataObjectTypes = [
-            .code128,
-            .ean13,
-            .ean8,
-            .upce,
-            .qr,
-            .dataMatrix,
-            .pdf417
-        ]
-
-        previewLayer = AVCaptureVideoPreviewLayer(session: captureSession!)
-        previewLayer?.frame = view.layer.bounds
-        previewLayer?.videoGravity = .resizeAspectFill
-        view.layer.addSublayer(previewLayer!)
-
-        DispatchQueue.global(qos: .userInitiated).async {
-            self.captureSession?.startRunning()
-        }
-    }
-
-    private func addOverlay() {
-        let overlay = UIView(frame: view.bounds)
-        overlay.backgroundColor = UIColor.black.withAlphaComponent(0.5)
-        view.addSubview(overlay)
-
-        let scanWidth: CGFloat = 280
-        let scanHeight: CGFloat = 160
-        let scanX = (view.bounds.width - scanWidth) / 2
-        let scanY = (view.bounds.height - scanHeight) / 2
-        let scanRect = CGRect(x: scanX, y: scanY, width: scanWidth, height: scanHeight)
-
-        let path = UIBezierPath(rect: view.bounds)
-        let cutout = UIBezierPath(roundedRect: scanRect, cornerRadius: 12)
-        path.append(cutout)
-        path.usesEvenOddFillRule = true
-
-        let maskLayer = CAShapeLayer()
-        maskLayer.path = path.cgPath
-        maskLayer.fillRule = .evenOdd
-        overlay.layer.mask = maskLayer
-
-        let borderView = UIView(frame: scanRect)
-        borderView.layer.borderColor = UIColor.white.cgColor
-        borderView.layer.borderWidth = 2
-        borderView.layer.cornerRadius = 12
-        borderView.backgroundColor = .clear
-        view.addSubview(borderView)
-
-        let label = UILabel()
-        label.text = "Align barcode within frame"
-        label.textColor = .white
-        label.font = .systemFont(ofSize: 14)
-        label.textAlignment = .center
-        label.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(label)
-
-        NSLayoutConstraint.activate([
-            label.centerXAnchor.constraint(equalTo: view.centerXAnchor),
-            label.topAnchor.constraint(equalTo: borderView.bottomAnchor, constant: 16)
-        ])
-
-        let cancelButton = UIButton(type: .system)
-        cancelButton.setTitle("Cancel", for: .normal)
-        cancelButton.setTitleColor(.white, for: .normal)
-        cancelButton.titleLabel?.font = .systemFont(ofSize: 17)
-        cancelButton.translatesAutoresizingMaskIntoConstraints = false
-        cancelButton.addTarget(self, action: #selector(cancel), for: .touchUpInside)
-        view.addSubview(cancelButton)
-
-        NSLayoutConstraint.activate([
-            cancelButton.centerXAnchor.constraint(equalTo: view.centerXAnchor),
-            cancelButton.bottomAnchor.constraint(
-                equalTo: view.safeAreaLayoutGuide.bottomAnchor,
-                constant: -24
-            )
-        ])
-    }
-
-    func metadataOutput(
-        _ output: AVCaptureMetadataOutput,
-        didOutput metadataObjects: [AVMetadataObject],
-        from connection: AVCaptureConnection
-    ) {
-        guard !hasScanned,
-              let object = metadataObjects.first as? AVMetadataMachineReadableCodeObject,
-              let value = object.stringValue
-        else { return }
-
-        hasScanned = true
-        captureSession?.stopRunning()
-        AudioServicesPlaySystemSound(SystemSoundID(kSystemSoundID_Vibrate))
-        onScan?(value)
-    }
-
-    private func showCameraError() {
-        let label = UILabel()
-        label.text = "Camera not available"
-        label.textColor = .white
-        label.textAlignment = .center
-        label.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(label)
-        NSLayoutConstraint.activate([
-            label.centerXAnchor.constraint(equalTo: view.centerXAnchor),
-            label.centerYAnchor.constraint(equalTo: view.centerYAnchor)
-        ])
-    }
-
-    @objc private func cancel() {
-        captureSession?.stopRunning()
-        dismiss(animated: true)
-    }
+#Preview {
+    CatalogSearchView()
+        .environmentObject(HCPCSSearchService())
 }

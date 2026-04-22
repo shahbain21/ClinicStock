@@ -4,8 +4,20 @@
 //
 //  Created by Mohamed Shahbain
 //
-//  UPDATED: Inventory now writes to subcollection path
-//  inventory/{clinicID}/items/{itemID}
+//  FIXES:
+//  - Clinic + admin profile + settings now written in a single WriteBatch
+//    with Auth rollback on failure. No more orphaned clinics.
+//  - Removed the mid-seed signOut() — the seeded admin stays signed in,
+//    which satisfies the new Firestore rules that require a signed-in
+//    admin for subsequent writes.
+//  - Inventory writes now route through DatabaseService.addItem.
+//  - User profile creation routes through DatabaseService.createUserProfile.
+//  - Admin credentials are parameters now (configurable in the UI)
+//    instead of hardcoded.
+//  - Pre-seed check: aborts if any clinic already exists unless the
+//    caller explicitly opts in via allowIfExisting: true.
+//  - lastError surfaces failure details to the UI.
+//  - Consistent @MainActor state mutations via a single helper.
 //
 
 import Foundation
@@ -13,179 +25,230 @@ import FirebaseAuth
 import FirebaseFirestore
 import Combine
 
+@MainActor
 class DatabaseSeeder: ObservableObject {
 
     @Published var status: String = "Ready to seed"
     @Published var isSeeding: Bool = false
     @Published var isComplete: Bool = false
+    @Published var lastError: String? = nil
 
     private let db = Firestore.firestore()
+    private let dbService = DatabaseService.shared
 
-    // ══════════════════════════════════════════
-    // Run this ONCE to set up your database
-    // ══════════════════════════════════════════
+    // ══════════════════════════════════════════════════════
+    // MARK: - Reset to initial state (for re-running)
+    // ══════════════════════════════════════════════════════
 
-    func seedDatabase() async {
-        await MainActor.run {
-            isSeeding = true
-            status = "Starting..."
+    func reset() {
+        isSeeding = false
+        isComplete = false
+        lastError = nil
+        status = "Ready to seed"
+    }
+
+    // ══════════════════════════════════════════════════════
+    // MARK: - Full database seed
+    //
+    // Creates: Firebase Auth account, clinic doc, admin user doc, default
+    // settings, sample inventory. The first four happen in one WriteBatch.
+    // Inventory is written after because it depends on the clinic ID and
+    // doesn't need to be atomic with clinic creation.
+    //
+    // Pass allowIfExisting: true to seed into a project that already has
+    // clinics (useful for test environments with multiple clinics).
+    // ══════════════════════════════════════════════════════
+
+    func seedDatabase(
+        adminEmail: String,
+        adminPassword: String,
+        allowIfExisting: Bool = false
+    ) async {
+        isSeeding = true
+        isComplete = false
+        lastError = nil
+        status = "Starting..."
+
+        // Pre-seed check — don't accidentally clone into a live project
+        if !allowIfExisting {
+            do {
+                let existing = try await db.collection("clinics")
+                    .limit(to: 1)
+                    .getDocuments()
+                if !existing.documents.isEmpty {
+                    lastError = "Project already has clinics. Pass allowIfExisting: true to seed anyway."
+                    status = "Aborted — project not empty"
+                    isSeeding = false
+                    return
+                }
+            } catch {
+                lastError = "Pre-seed check failed: \(error.localizedDescription)"
+                status = "Aborted"
+                isSeeding = false
+                return
+            }
         }
 
-        // Step 1: Create the clinic
-        await updateStatus("Creating clinic...")
-        let clinicID = await createClinic()
-
-        guard let clinicID = clinicID else {
-            await updateStatus("Failed to create clinic")
+        // Step 1: Create Firebase Auth account
+        status = "Creating admin auth account..."
+        let authResult: AuthDataResult
+        do {
+            authResult = try await Auth.auth().createUser(
+                withEmail: adminEmail,
+                password: adminPassword
+            )
+        } catch {
+            lastError = "Auth account creation failed: \(error.localizedDescription)"
+            status = "Failed"
+            isSeeding = false
             return
         }
 
-        // Step 2: Create the admin account
-        await updateStatus("Creating admin account...")
-        await createAdminAccount(clinicID: clinicID)
+        let adminUID = authResult.user.uid
 
-        // Step 3: Create app settings
-        await updateStatus("Creating settings...")
-        await createSettings()
+        // Steps 2-4: Clinic, admin profile, settings as a single batch.
+        // If this fails, we roll back the Auth account.
+        let clinicID: String
+        do {
+            clinicID = try await commitSeedBatch(adminUID: adminUID)
+        } catch {
+            // Roll back Auth account so a retry can reuse the same email
+            print("Batch commit failed — rolling back Auth account: \(error)")
+            try? await authResult.user.delete()
+            try? Auth.auth().signOut()
 
-        // Step 4: Add inventory from checklist
-        await updateStatus("Adding inventory items...")
-        await createInventory(clinicID: clinicID)
-
-        // Done!
-        await MainActor.run {
+            lastError = "Batch write failed: \(error.localizedDescription)"
+            status = "Failed — rolled back"
             isSeeding = false
-            isComplete = true
-            status = "Database setup complete!"
+            return
         }
+
+        print("Clinic + admin + settings committed: \(clinicID)")
+
+        // Step 5: Inventory — not batched because there are 18 items and
+        // Firestore batches are capped at 500 writes (fine for us, but
+        // one-at-a-time gives better progress feedback for dev use).
+        status = "Adding inventory items..."
+        await seedInventory(clinicID: clinicID)
+
+        isSeeding = false
+        isComplete = true
+        status = "Database setup complete!"
     }
 
-    // ══════════════════════════════════════════
+    // ══════════════════════════════════════════════════════
     // MARK: - Seed ONLY inventory for existing clinic
-    // Use this if clinic + admin already exist
-    // ══════════════════════════════════════════
+    // ══════════════════════════════════════════════════════
 
     func seedInventoryOnly(clinicID: String) async {
-        await MainActor.run {
-            isSeeding = true
-            status = "Adding inventory items..."
-        }
+        isSeeding = true
+        isComplete = false
+        lastError = nil
+        status = "Adding inventory items..."
 
-        await createInventory(clinicID: clinicID)
+        await seedInventory(clinicID: clinicID)
 
-        await MainActor.run {
-            isSeeding = false
-            isComplete = true
-            status = "Inventory seeded!"
-        }
+        isSeeding = false
+        isComplete = true
+        status = "Inventory seeded!"
     }
 
-    // ── Create Clinic ──
-    private func createClinic() async -> String? {
-        do {
-            let clinicRef = db.collection("clinics").document()
+    // ══════════════════════════════════════════════════════
+    // MARK: - Private: batched seed (clinic + admin + settings)
+    // ══════════════════════════════════════════════════════
 
-            try await clinicRef.setData([
-                "name": "Specialty Medical Center",
-                "address": "123 Main Street",
-                "city": "Dearborn",
-                "state": "MI",
-                "zip": "48124",
-                "phone": "313-555-0101",
-                "email": "dearborn@clinic.com",
-                "managerID": "",
-                "isActive": true,
-                "dateCreated": Timestamp(date: Date())
-            ])
+    private func commitSeedBatch(adminUID: String) async throws -> String {
+        let clinicRef = db.collection("clinics").document()
+        let clinicID = clinicRef.documentID
+        let userRef = db.collection("users").document(adminUID)
+        let categoriesRef = db.collection("settings").document("categories")
+        let sizesRef = db.collection("settings").document("sizes")
 
-            print("Clinic created: \(clinicRef.documentID)")
-            return clinicRef.documentID
+        let batch = db.batch()
 
-        } catch {
-            print("Error creating clinic: \(error)")
-            return nil
-        }
+        batch.setData([
+            "name": "Specialty Medical Center",
+            "address": "123 Main Street",
+            "city": "Dearborn",
+            "state": "MI",
+            "zip": "48124",
+            "phone": "313-555-0101",
+            "email": "dearborn@clinic.com",
+            "managerID": adminUID,
+            "isActive": true,
+            "dateCreated": Timestamp(date: Date())
+        ], forDocument: clinicRef)
+
+        batch.setData([
+            "email": "admin@clinicstock.com",
+            "displayName": "Admin User",
+            "role": "admin",
+            "clinicID": clinicID,
+            "phone": "313-555-0000",
+            "isActive": true,
+            "lastLogin": Timestamp(date: Date()),
+            "dateCreated": Timestamp(date: Date())
+        ], forDocument: userRef)
+
+        batch.setData([
+            "list": [
+                "Orthopedic", "Cervical", "Lumbar", "Wound Care",
+                "Respiratory", "Diabetic Supplies", "Compression",
+                "Mobility Aids", "Electrical Stimulation", "General Medical"
+            ]
+        ], forDocument: categoriesRef, merge: true)
+
+        batch.setData([
+            "list": [
+                "XS", "S", "M", "L", "XL", "XXL",
+                "Universal", "Pediatric", "Custom",
+                "N/A", "RT", "LT"
+            ]
+        ], forDocument: sizesRef, merge: true)
+
+        try await batch.commit()
+        return clinicID
     }
 
-    // ── Create Admin Account ──
-    private func createAdminAccount(clinicID: String) async {
-        do {
-            let result = try await Auth.auth().createUser(
-                withEmail: "admin@clinicstock.com",
-                password: "Test1234!"
-            )
+    // ══════════════════════════════════════════════════════
+    // MARK: - Private: inventory seed
+    // Routes through DatabaseService.addItem.
+    // ══════════════════════════════════════════════════════
 
-            let uid = result.user.uid
+    private func seedInventory(clinicID: String) async {
+        let items = sampleInventory(clinicID: clinicID)
 
-            try await db.collection("users").document(uid).setData([
-                "email": "admin@clinicstock.com",
-                "displayName": "Admin User",
-                "role": "admin",
-                "clinicID": clinicID,
-                "phone": "313-555-0000",
-                "isActive": true,
-                "lastLogin": Timestamp(date: Date()),
-                "dateCreated": Timestamp(date: Date())
-            ])
+        var successCount = 0
+        var firstError: String? = nil
 
-            // Update clinic with manager ID
-            try await db.collection("clinics").document(clinicID).updateData([
-                "managerID": uid
-            ])
-
-            // Sign out so we can test logging in
-            try Auth.auth().signOut()
-
-            print("Admin account created")
-            print("Email: admin@clinicstock.com")
-            print("Password: Test1234!")
-
-        } catch {
-            print("Error creating admin: \(error)")
+        for item in items {
+            do {
+                _ = try await dbService.addItem(item, clinicID: clinicID)
+                successCount += 1
+                let name = item["name"] as? String ?? "?"
+                let size = item["size"] as? String ?? "?"
+                print("Added: \(name) (\(size))")
+            } catch {
+                if firstError == nil {
+                    firstError = error.localizedDescription
+                }
+                print("Error adding item: \(error)")
+            }
         }
+
+        status = "Added \(successCount)/\(items.count) inventory items"
+        if let err = firstError {
+            lastError = "Some items failed. First error: \(err)"
+        }
+        print("Added \(successCount) inventory items to clinic \(clinicID)")
     }
 
-    // ── Create Settings ──
-    private func createSettings() async {
-        do {
-            try await db.collection("settings").document("categories").setData([
-                "list": [
-                    "Orthopedic",
-                    "Cervical",
-                    "Lumbar",
-                    "Wound Care",
-                    "Respiratory",
-                    "Diabetic Supplies",
-                    "Compression",
-                    "Mobility Aids",
-                    "Electrical Stimulation",
-                    "General Medical"
-                ]
-            ])
+    // ══════════════════════════════════════════════════════
+    // MARK: - Private: sample inventory data
+    // ══════════════════════════════════════════════════════
 
-            try await db.collection("settings").document("sizes").setData([
-                "list": [
-                    "XS", "S", "M", "L", "XL", "XXL",
-                    "Universal", "Pediatric", "Custom",
-                    "N/A", "RT", "LT"
-                ]
-            ])
-
-            print("Settings created")
-
-        } catch {
-            print("Error creating settings: \(error)")
-        }
-    }
-
-    // ══════════════════════════════════════════
-    // MARK: - Create Inventory (SUBCOLLECTION)
-    // Path: inventory/{clinicID}/items/{itemID}
-    // ══════════════════════════════════════════
-
-    private func createInventory(clinicID: String) async {
-
-        let items: [[String: Any]] = [
+    private func sampleInventory(clinicID: String) -> [[String: Any]] {
+        return [
             makeItem(name: "LSO Brace", hcpcs: "L0625", size: "Universal",
                     qty: 51, category: "Lumbar", clinicID: clinicID),
 
@@ -240,31 +303,8 @@ class DatabaseSeeder: ObservableObject {
             makeItem(name: "OA Knee Brace", hcpcs: "L1843", size: "LT",
                     qty: 0, category: "Orthopedic", clinicID: clinicID),
         ]
-
-        var successCount = 0
-
-        for item in items {
-            do {
-                // ✅ Subcollection path: inventory/{clinicID}/items/{autoID}
-                let _ = try await db.collection("inventory")
-                    .document(clinicID)
-                    .collection("items")
-                    .addDocument(data: item)
-
-                successCount += 1
-                let name = item["name"] as? String ?? "?"
-                let size = item["size"] as? String ?? "?"
-                print("Added: \(name) (\(size))")
-            } catch {
-                print("Error adding item: \(error)")
-            }
-        }
-
-        await updateStatus("Added \(successCount)/\(items.count) inventory items")
-        print("Added \(successCount) inventory items to clinic \(clinicID)")
     }
 
-    // ── Helper: build an item dictionary ──
     private func makeItem(
         name: String,
         hcpcs: String,
@@ -292,13 +332,5 @@ class DatabaseSeeder: ObservableObject {
             "dateAdded": Timestamp(date: Date()),
             "notes": ""
         ]
-    }
-
-    // ── Helper: update status on main thread ──
-    private func updateStatus(_ message: String) async {
-        await MainActor.run {
-            status = message
-        }
-        print(message)
     }
 }

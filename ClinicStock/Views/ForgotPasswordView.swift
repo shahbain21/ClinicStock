@@ -4,10 +4,14 @@
 //
 //  Created by Mohamed Shahbain
 //
-//  UPDATED:
-//  - Dark mode support
-//  - Keyboard dismiss
-//  - Consistent color tokens
+//  FIXES:
+//  - "Send Reset Login" typo fixed to "Send Reset Link".
+//  - Duplicate #Preview blocks removed (was three previews, two named
+//    Light/Dark and one unnamed copy).
+//  - errorMessage cleared on appear.
+//  - Preview uses AuthManager.preview().
+//  - Form hidden after success to reduce visual clutter during the
+//    auto-dismiss delay.
 //
 
 import SwiftUI
@@ -31,8 +35,7 @@ struct ForgotPasswordView: View {
                 .frame(width: 40, height: 5)
                 .padding(.top, AppSpacing.md)
 
-            Spacer()
-                .frame(height: 80)
+            Spacer().frame(height: 80)
 
             // ── Header ──
             VStack(spacing: AppSpacing.md) {
@@ -40,64 +43,17 @@ struct ForgotPasswordView: View {
                     .font(AppFonts.title)
                     .foregroundColor(AppColors.textPrimary)
 
-                Text("Enter Email To Send A Reset Link")
+                Text("Enter your email to send a reset link")
                     .font(AppFonts.caption)
                     .foregroundColor(AppColors.textSecondary)
             }
             .padding(.bottom, AppSpacing.xxxl)
 
-            // ── Email Field ──
-            UnderlineTextField(
-                title: "Email",
-                placeholder: "Enter your email",
-                text: $email,
-                keyboardType: .emailAddress
-            )
-            .padding(.horizontal, AppSpacing.xxl)
-
-            // ── Error Message ──
-            if let error = errorMessage {
-                HStack(spacing: AppSpacing.sm) {
-                    Image(systemName: "exclamationmark.circle.fill")
-                        .font(.system(size: 14))
-                    Text(error)
-                        .font(AppFonts.caption)
-                }
-                .foregroundColor(AppColors.danger)
-                .padding(.horizontal, AppSpacing.xxl)
-                .padding(.top, AppSpacing.lg)
-                .transition(.opacity.combined(with: .move(edge: .top)))
-            }
-
-            // ── Success Message ──
             if showSuccess {
-                HStack(spacing: AppSpacing.sm) {
-                    Image(systemName: "checkmark.circle.fill")
-                        .font(.system(size: 14))
-                    Text("Reset link sent! Check your inbox.")
-                        .font(AppFonts.caption)
-                }
-                .foregroundColor(AppColors.success)
-                .padding(.horizontal, AppSpacing.xxl)
-                .padding(.top, AppSpacing.lg)
-                .transition(.opacity.combined(with: .move(edge: .top)))
+                successState
+            } else {
+                requestForm
             }
-
-            // ── Send Reset Button ──
-            Button(action: sendReset) {
-                if isSending {
-                    ProgressView()
-                        .progressViewStyle(
-                            CircularProgressViewStyle(tint: .white)
-                        )
-                } else {
-                    Text("Send Reset Login")
-                }
-            }
-            .buttonStyle(PrimaryButtonStyle(isDisabled: !isFormValid))
-            .disabled(!isFormValid || isSending)
-            .padding(.horizontal, AppSpacing.xxl)
-            .padding(.top, AppSpacing.xxxl)
 
             Spacer()
 
@@ -113,6 +69,74 @@ struct ForgotPasswordView: View {
         .animation(.easeInOut(duration: 0.3), value: showSuccess)
         .animation(.easeInOut(duration: 0.3), value: errorMessage)
         .appBackground()
+        .onAppear {
+            authManager.clearError()
+            errorMessage = nil
+        }
+    }
+
+    // ══════════════════════════════════════════════════════
+    // MARK: - States
+    // ══════════════════════════════════════════════════════
+
+    private var requestForm: some View {
+        VStack(spacing: 0) {
+            UnderlineTextField(
+                title: "Email",
+                placeholder: "Enter your email",
+                text: $email,
+                keyboardType: .emailAddress
+            )
+            .padding(.horizontal, AppSpacing.xxl)
+
+            if let error = errorMessage {
+                HStack(spacing: AppSpacing.sm) {
+                    Image(systemName: "exclamationmark.circle.fill")
+                        .font(.system(size: 14))
+                    Text(error)
+                        .font(AppFonts.caption)
+                }
+                .foregroundColor(AppColors.danger)
+                .padding(.horizontal, AppSpacing.xxl)
+                .padding(.top, AppSpacing.lg)
+                .transition(.opacity.combined(with: .move(edge: .top)))
+            }
+
+            Button(action: sendReset) {
+                if isSending {
+                    ProgressView()
+                        .progressViewStyle(
+                            CircularProgressViewStyle(tint: .white)
+                        )
+                } else {
+                    Text("Send Reset Link")
+                }
+            }
+            .buttonStyle(PrimaryButtonStyle(isDisabled: !isFormValid))
+            .disabled(!isFormValid || isSending)
+            .padding(.horizontal, AppSpacing.xxl)
+            .padding(.top, AppSpacing.xxxl)
+        }
+    }
+
+    private var successState: some View {
+        VStack(spacing: AppSpacing.lg) {
+            Image(systemName: "checkmark.circle.fill")
+                .font(.system(size: 50))
+                .foregroundColor(AppColors.success)
+
+            Text("Reset link sent!")
+                .font(AppFonts.title3)
+                .foregroundColor(AppColors.textPrimary)
+
+            Text("Check your inbox for instructions to reset your password.")
+                .font(AppFonts.caption)
+                .foregroundColor(AppColors.textSecondary)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, AppSpacing.xxl)
+        }
+        .padding(.horizontal, AppSpacing.xxl)
+        .transition(.opacity)
     }
 
     // ══════════════════════════════════════════════════════
@@ -131,29 +155,21 @@ struct ForgotPasswordView: View {
     private func sendReset() {
         isSending = true
         errorMessage = nil
-        showSuccess = false
 
         Task {
             do {
-                try await authManager.resetPassword(
-                    email: email.trimmingCharacters(in: .whitespaces)
-                )
+                try await authManager.resetPassword(email: email)
 
-                await MainActor.run {
-                    showSuccess = true
-                    isSending = false
-                }
+                showSuccess = true
+                isSending = false
 
-                // Auto dismiss after 2 seconds
+                // Auto-dismiss after 2 seconds so the user can see the
+                // confirmation without feeling stuck on the sheet.
                 try? await Task.sleep(nanoseconds: 2_000_000_000)
-                await MainActor.run {
-                    dismiss()
-                }
+                dismiss()
             } catch {
-                await MainActor.run {
-                    errorMessage = error.localizedDescription
-                    isSending = false
-                }
+                errorMessage = error.localizedDescription
+                isSending = false
             }
         }
     }
@@ -165,20 +181,12 @@ struct ForgotPasswordView: View {
 
 #Preview("Light") {
     ForgotPasswordView()
-        .environmentObject(AuthManager())
+        .environmentObject(AuthManager.preview())
         .preferredColorScheme(.light)
 }
 
 #Preview("Dark") {
     ForgotPasswordView()
-        .environmentObject(AuthManager())
+        .environmentObject(AuthManager.preview())
         .preferredColorScheme(.dark)
-}
-// ══════════════════════════════════════════════════════
-// MARK: - Preview
-// ══════════════════════════════════════════════════════
-
-#Preview {
-    ForgotPasswordView()
-        .environmentObject(AuthManager())
 }

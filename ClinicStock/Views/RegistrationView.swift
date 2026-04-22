@@ -1,33 +1,52 @@
 //
-//  JoinClinicView.swift
+//  RegistrationView.swift
 //  ClinicStock
 //
-//  Created by Mohamed Shahbain on 4/16/26.
+//  Created by Mohamed Shahbain on 4/21/26.
 //
-//  For invited users who want to sign in with email/password instead of
-//  Google/Apple.
+
+
 //
-//  FIXES:
-//  - Auth logic moved into AuthManager.joinClinic(email:password:). The
-//    view just calls the manager and reacts to success/failure.
-//  - Dead helper checkInvitationExists() removed.
-//  - Apple/Google visual reminder simplified to a single line of text.
-//  - errorMessage cleared on appear so stale errors from a previous
-//    sheet don't bleed in.
-//  - Preview uses AuthManager.preview().
+//  RegistrationView.swift
+//  ClinicStock
+//
+//  Created by Mohamed Shahbain
+//
+//  First-time clinic setup. Collects admin + clinic details and calls
+//  AuthManager.registerClinic, which writes:
+//    - A Firebase Auth account for the admin
+//    - A clinic document
+//    - A user profile with role "admin"
+//    - Default settings if the settings docs don't already exist
+//
+//  On success the auth listener flips isAuthenticated and RootView swaps
+//  in MainTabView. The sheet dismisses automatically.
+//
+//  On failure the Auth account is rolled back (by AuthManager.registerClinic)
+//  so the admin can retry with the same email.
 //
 
 import SwiftUI
 
-struct JoinClinicView: View {
+struct RegistrationView: View {
 
     @EnvironmentObject var authManager: AuthManager
     @Environment(\.dismiss) private var dismiss
 
+    // Admin identity
+    @State private var firstName = ""
+    @State private var lastName = ""
+
+    // Clinic identity
+    @State private var organizationName = ""
+    @State private var location = ""
+
+    // Credentials
     @State private var email = ""
     @State private var password = ""
     @State private var confirmPassword = ""
-    @State private var isJoining = false
+
+    @State private var isRegistering = false
     @State private var errorMessage: String?
 
     var body: some View {
@@ -40,26 +59,26 @@ struct JoinClinicView: View {
                     .frame(width: 40, height: 5)
                     .padding(.top, AppSpacing.md)
 
-                Spacer().frame(height: 60)
+                Spacer().frame(height: 40)
 
                 // ── Header ──
                 VStack(spacing: AppSpacing.sm) {
-                    Text("Join Your Clinic")
+                    Text("Set Up Your Clinic")
                         .font(AppFonts.title)
                         .foregroundColor(AppColors.textPrimary)
 
-                    Text("Create your account to join an existing clinic")
+                    Text("Create an admin account and register your clinic")
                         .font(AppFonts.caption)
                         .foregroundColor(AppColors.textSecondary)
                         .multilineTextAlignment(.center)
                 }
-                .padding(.bottom, AppSpacing.xxxl)
+                .padding(.bottom, AppSpacing.xxl)
 
                 // ── Info Banner ──
                 HStack(alignment: .top, spacing: AppSpacing.md) {
                     Image(systemName: "info.circle.fill")
                         .foregroundColor(AppColors.accent)
-                    Text("Your clinic admin must have invited you first. Use the same email address they invited you with.")
+                    Text("You'll be the first admin for this clinic. You can invite staff from Settings after signing in.")
                         .font(AppFonts.footnote)
                         .foregroundColor(AppColors.textSecondary)
                 }
@@ -71,12 +90,51 @@ struct JoinClinicView: View {
                 .padding(.horizontal, AppSpacing.xxl)
                 .padding(.bottom, AppSpacing.xxl)
 
-                // ── Form Fields ──
+                // ── Admin Section ──
+                sectionHeader("About you")
+
                 VStack(spacing: AppSpacing.xl) {
+                    UnderlineTextField(
+                        title: "First Name",
+                        placeholder: "Your first name",
+                        text: $firstName
+                    )
 
                     UnderlineTextField(
+                        title: "Last Name",
+                        placeholder: "Your last name",
+                        text: $lastName
+                    )
+                }
+                .padding(.horizontal, AppSpacing.xxl)
+                .padding(.bottom, AppSpacing.xl)
+
+                // ── Clinic Section ──
+                sectionHeader("About your clinic")
+
+                VStack(spacing: AppSpacing.xl) {
+                    UnderlineTextField(
+                        title: "Clinic Name",
+                        placeholder: "e.g. Specialty Medical Center",
+                        text: $organizationName
+                    )
+
+                    UnderlineTextField(
+                        title: "Location",
+                        placeholder: "City or street address",
+                        text: $location
+                    )
+                }
+                .padding(.horizontal, AppSpacing.xxl)
+                .padding(.bottom, AppSpacing.xl)
+
+                // ── Credentials Section ──
+                sectionHeader("Admin login")
+
+                VStack(spacing: AppSpacing.xl) {
+                    UnderlineTextField(
                         title: "Email",
-                        placeholder: "Enter the email you were invited with",
+                        placeholder: "admin@yourclinic.com",
                         text: $email,
                         keyboardType: .emailAddress
                     )
@@ -134,29 +192,21 @@ struct JoinClinicView: View {
                     .padding(.top, AppSpacing.lg)
                 }
 
-                // ── Join Button ──
-                Button(action: joinClinic) {
-                    if isJoining {
+                // ── Create Button ──
+                Button(action: register) {
+                    if isRegistering {
                         ProgressView()
                             .progressViewStyle(
                                 CircularProgressViewStyle(tint: .white)
                             )
                     } else {
-                        Text("Join Clinic")
+                        Text("Create Clinic")
                     }
                 }
                 .buttonStyle(PrimaryButtonStyle(isDisabled: !isFormValid))
-                .disabled(!isFormValid || isJoining)
+                .disabled(!isFormValid || isRegistering)
                 .padding(.horizontal, AppSpacing.xxl)
                 .padding(.top, AppSpacing.xxxl)
-
-                // ── Social sign-in reminder ──
-                Text("You can also sign in with Apple or Google from the login page.")
-                    .font(AppFonts.footnote)
-                    .foregroundColor(AppColors.textTertiary)
-                    .multilineTextAlignment(.center)
-                    .padding(.horizontal, AppSpacing.xxl)
-                    .padding(.top, AppSpacing.xl)
 
                 // ── Back Link ──
                 Button(action: { dismiss() }) {
@@ -178,10 +228,30 @@ struct JoinClinicView: View {
     }
 
     // ══════════════════════════════════════════════════════
+    // MARK: - Section Header Helper
+    // ══════════════════════════════════════════════════════
+
+    private func sectionHeader(_ text: String) -> some View {
+        HStack {
+            Text(text)
+                .font(AppFonts.captionSemibold)
+                .foregroundColor(AppColors.textTertiary)
+                .textCase(.uppercase)
+            Spacer()
+        }
+        .padding(.horizontal, AppSpacing.xxl)
+        .padding(.bottom, AppSpacing.md)
+    }
+
+    // ══════════════════════════════════════════════════════
     // MARK: - Validation
     // ══════════════════════════════════════════════════════
 
     private var isFormValid: Bool {
+        !firstName.trimmingCharacters(in: .whitespaces).isEmpty &&
+        !lastName.trimmingCharacters(in: .whitespaces).isEmpty &&
+        !organizationName.trimmingCharacters(in: .whitespaces).isEmpty &&
+        !location.trimmingCharacters(in: .whitespaces).isEmpty &&
         !email.trimmingCharacters(in: .whitespaces).isEmpty &&
         email.contains("@") &&
         isPasswordValid &&
@@ -195,50 +265,35 @@ struct JoinClinicView: View {
     }
 
     // ══════════════════════════════════════════════════════
-    // MARK: - Join Action
+    // MARK: - Register Action
     // ══════════════════════════════════════════════════════
 
-    private func joinClinic() {
-        isJoining = true
+    private func register() {
+        isRegistering = true
         errorMessage = nil
 
         Task {
             do {
-                try await authManager.joinClinic(email: email, password: password)
-                // Auth listener will flip isAuthenticated. Sheet dismisses
-                // itself because RootView will swap LoginView → MainTabView.
+                try await authManager.registerClinic(
+                    firstName: firstName,
+                    lastName: lastName,
+                    organizationName: organizationName,
+                    location: location,
+                    email: email,
+                    password: password
+                )
+                // Auth listener will flip isAuthenticated and RootView
+                // will swap to MainTabView. Sheet dismisses on the way out.
                 dismiss()
             } catch {
                 let nsError = error as NSError
                 if nsError.code == 17007 {
-                    // Firebase error: EMAIL_EXISTS
-                    errorMessage = "An account with this email already exists. Try signing in from the login page."
+                    errorMessage = "An account with this email already exists. Try signing in instead."
                 } else {
                     errorMessage = error.localizedDescription
                 }
-                isJoining = false
+                isRegistering = false
             }
-        }
-    }
-}
-
-// ══════════════════════════════════════════════════════
-// MARK: - Password Requirement Row
-// ══════════════════════════════════════════════════════
-
-struct PasswordRequirement: View {
-    let text: String
-    let isMet: Bool
-
-    var body: some View {
-        HStack(spacing: AppSpacing.sm) {
-            Image(systemName: isMet ? "checkmark.circle.fill" : "circle")
-                .font(.system(size: 14))
-                .foregroundColor(isMet ? AppColors.success : AppColors.textTertiary)
-
-            Text(text)
-                .font(AppFonts.caption)
-                .foregroundColor(isMet ? AppColors.textPrimary : AppColors.textTertiary)
         }
     }
 }
@@ -248,13 +303,13 @@ struct PasswordRequirement: View {
 // ══════════════════════════════════════════════════════
 
 #Preview("Light") {
-    JoinClinicView()
+    RegistrationView()
         .environmentObject(AuthManager.preview())
         .preferredColorScheme(.light)
 }
 
 #Preview("Dark") {
-    JoinClinicView()
+    RegistrationView()
         .environmentObject(AuthManager.preview())
         .preferredColorScheme(.dark)
 }
