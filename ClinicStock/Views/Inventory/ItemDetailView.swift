@@ -630,12 +630,15 @@ struct ItemDetailView: View {
         guard let user = authManager.currentUser,
               let itemID = currentItem.id else { return }
 
+        let clinicID = authManager.effectiveClinicID
+
         Task {
             do {
                 try await inventoryManager.checkOut(
                     itemID: itemID,
                     amount: amount,
-                    by: user
+                    by: user,
+                    clinicID: clinicID
                 )
                 await loadHistory()
             } catch {
@@ -648,12 +651,15 @@ struct ItemDetailView: View {
         guard let user = authManager.currentUser,
               let itemID = currentItem.id else { return }
 
+        let clinicID = authManager.effectiveClinicID
+
         Task {
             do {
                 try await inventoryManager.addStock(
                     itemID: itemID,
                     amount: amount,
-                    by: user
+                    by: user,
+                    clinicID: clinicID
                 )
                 await loadHistory()
             } catch {
@@ -666,6 +672,7 @@ struct ItemDetailView: View {
         guard let user = authManager.currentUser,
               let itemID = currentItem.id else { return }
 
+        let clinicID = authManager.effectiveClinicID
         let prev = Int(log.previousValue) ?? 0
         let new = Int(log.newValue) ?? 0
         let amount = prev - new
@@ -676,7 +683,8 @@ struct ItemDetailView: View {
                     itemID: itemID,
                     amount: amount,
                     checkoutTime: log.timestamp,
-                    by: user
+                    by: user,
+                    clinicID: clinicID
                 )
                 await loadHistory()
             } catch {
@@ -689,9 +697,15 @@ struct ItemDetailView: View {
         guard let user = authManager.currentUser,
               let itemID = currentItem.id else { return }
 
+        let clinicID = authManager.effectiveClinicID
+
         Task {
             do {
-                try await inventoryManager.removeItem(itemID: itemID, by: user)
+                try await inventoryManager.removeItem(
+                    itemID: itemID,
+                    by: user,
+                    clinicID: clinicID
+                )
                 dismiss()
             } catch {
                 errorMessage = error.localizedDescription
@@ -701,7 +715,7 @@ struct ItemDetailView: View {
 
     private func loadHistory() async {
         guard let itemID = currentItem.id,
-              let clinicID = authManager.currentUser?.clinicID else { return }
+              let clinicID = authManager.effectiveClinicID else { return }
 
         isLoadingLogs = true
         defer { isLoadingLogs = false }

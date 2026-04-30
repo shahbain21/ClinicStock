@@ -101,6 +101,77 @@ struct InventoryListView: View {
         PermissionManager.canAddStock(role: authManager.currentUser?.role ?? .staff)
     }
 
+    /// True when admin is viewing across all clinics. Hides the Add
+    /// Item bar (no clinic context to add to) and switches the list
+    /// to the aggregated grouped-by-product layout.
+    private var isAggregateMode: Bool {
+        authManager.isAggregateMode
+    }
+
+    /// Aggregated inventory rows, used in aggregate mode. Items are
+    /// merged by (lowercased name, HCPCS, lot number) — same product
+    /// at different locations gets one row with a per-clinic breakdown.
+    /// We use lot number as part of the key so different lots of the
+    /// same product still appear as separate rows (lot tracking matters
+    /// for medical inventory).
+    private var aggregatedRows: [AggregatedInventoryRow] {
+        let groups = Dictionary(grouping: inventoryManager.items) { item in
+            AggregatedInventoryRow.Key(
+                name: item.name.lowercased(),
+                hcpcsCode: item.hcpcsCode.uppercased(),
+                lotNumber: item.lotNumber
+            )
+        }
+
+        let rows = groups.map { _, items in
+            AggregatedInventoryRow(items: items)
+        }
+
+        // Apply search/filter same as the per-clinic path
+        let filtered = applyAggregateFilters(to: rows)
+        return applyAggregateSort(to: filtered)
+    }
+
+    private func applyAggregateFilters(
+        to rows: [AggregatedInventoryRow]
+    ) -> [AggregatedInventoryRow] {
+        var filtered = rows
+
+        switch selectedFilter {
+        case .all: break
+        case .low:
+            filtered = filtered.filter { $0.totalQuantity <= $0.lowestThreshold }
+        case .out:
+            filtered = filtered.filter { $0.totalQuantity == 0 }
+        }
+
+        if !searchText.isEmpty {
+            let q = searchText.lowercased()
+            filtered = filtered.filter {
+                $0.displayName.lowercased().contains(q) ||
+                $0.hcpcsCode.lowercased().contains(q) ||
+                $0.lotNumber.lowercased().contains(q)
+            }
+        }
+
+        return filtered
+    }
+
+    private func applyAggregateSort(
+        to rows: [AggregatedInventoryRow]
+    ) -> [AggregatedInventoryRow] {
+        switch sortOrder {
+        case .nameAsc:
+            return rows.sorted { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
+        case .nameDesc:
+            return rows.sorted { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedDescending }
+        case .qtyAsc:
+            return rows.sorted { $0.totalQuantity < $1.totalQuantity }
+        case .qtyDesc:
+            return rows.sorted { $0.totalQuantity > $1.totalQuantity }
+        }
+    }
+
     // ══════════════════════════════════════════════════════
     // MARK: - Body
     // ══════════════════════════════════════════════════════
@@ -133,7 +204,7 @@ struct InventoryListView: View {
                     .environmentObject(inventoryManager)
             }
             .safeAreaInset(edge: .bottom) {
-                if canAddStock {
+                if canAddStock && !isAggregateMode {
                     bottomBar
                 }
             }
@@ -273,9 +344,12 @@ struct InventoryListView: View {
     private var listContent: some View {
         if inventoryManager.isLoading && inventoryManager.items.isEmpty {
             Spacer()
-            ProgressView("Loading inventory...")
+            ProgressView(isAggregateMode ? "Loading all clinics..." : "Loading inventory...")
                 .foregroundColor(AppColors.textSecondary)
             Spacer()
+
+        } else if isAggregateMode {
+            aggregateListContent
 
         } else if filteredItems.isEmpty {
             Spacer()
@@ -303,6 +377,41 @@ struct InventoryListView: View {
                 .padding(.bottom, AppSpacing.md)
             }
             .scrollContentBackground(.hidden)
+        }
+    }
+
+    /// Aggregate-mode list. Rows show the merged-product totals plus
+    /// a per-clinic breakdown beneath each. Pull-to-refresh re-fetches
+    /// since aggregate mode doesn't use a real-time listener.
+    @ViewBuilder
+    private var aggregateListContent: some View {
+        let rows = aggregatedRows
+
+        if rows.isEmpty {
+            Spacer()
+            EmptyStateView(
+                icon: "square.grid.2x2",
+                title: searchText.isEmpty ? "No Items Yet" : "No Results",
+                message: searchText.isEmpty
+                    ? "Add items in any clinic to see them here"
+                    : "Try a different search term"
+            )
+            Spacer()
+        } else {
+            ScrollView {
+                LazyVStack(spacing: AppSpacing.sm) {
+                    ForEach(rows) { row in
+                        AggregateInventoryRowView(row: row)
+                    }
+                }
+                .padding(.horizontal, AppSpacing.lg)
+                .padding(.top, AppSpacing.md)
+                .padding(.bottom, AppSpacing.md)
+            }
+            .scrollContentBackground(.hidden)
+            .refreshable {
+                await inventoryManager.loadAggregateInventory()
+            }
         }
     }
 
@@ -346,7 +455,7 @@ struct InventoryListView: View {
     // ══════════════════════════════════════════════════════
 
     private func retryListener() {
-        guard let clinicID = authManager.currentUser?.clinicID else { return }
+        guard let clinicID = authManager.effectiveClinicID else { return }
         inventoryManager.startListening(clinicID: clinicID)
     }
 }
@@ -451,6 +560,203 @@ struct FilterPill: View {
                     lineWidth: 1
                 )
             )
+        }
+    }
+}
+
+// ══════════════════════════════════════════════════════
+// MARK: - Aggregated row (cross-clinic merged item)
+// ══════════════════════════════════════════════════════
+
+/// One row in the aggregate-mode list. Represents the same product
+/// (matched on name + HCPCS + lot) across all clinics that stock it.
+struct AggregatedInventoryRow: Identifiable {
+    struct Key: Hashable {
+        let name: String
+        let hcpcsCode: String
+        let lotNumber: String
+    }
+
+    let items: [InventoryItem]
+
+    var id: String {
+        // Deterministic key for SwiftUI ForEach. Stable regardless of
+        // item order because we sort the clinic IDs.
+        let clinicSig = items
+            .compactMap { $0.clinicID }
+            .sorted()
+            .joined(separator: "|")
+        return "\(displayName)|\(hcpcsCode)|\(lotNumber)|\(clinicSig)"
+    }
+
+    var displayName: String {
+        items.first?.name ?? "Unknown"
+    }
+
+    var hcpcsCode: String {
+        items.first?.hcpcsCode.uppercased() ?? ""
+    }
+
+    var lotNumber: String {
+        items.first?.lotNumber ?? ""
+    }
+
+    var category: String {
+        items.first?.category ?? ""
+    }
+
+    var totalQuantity: Int {
+        items.map { $0.quantity }.reduce(0, +)
+    }
+
+    /// Use the lowest threshold across locations as the "is this low"
+    /// signal. If ANY location considers this item low, the row reads
+    /// as low overall — better to over-warn than miss a shortage.
+    var lowestThreshold: Int {
+        items.map { $0.lowStockThreshold }.min() ?? 0
+    }
+
+    var isLow: Bool {
+        totalQuantity > 0 && totalQuantity <= lowestThreshold
+    }
+
+    var isOut: Bool {
+        totalQuantity == 0
+    }
+
+    /// Per-clinic breakdown rows. Each tuple = (clinicID, clinicName, qty).
+    /// Sorted descending by quantity so the location with the most stock
+    /// shows first.
+    var perClinicBreakdown: [(clinicID: String, qty: Int)] {
+        let grouped = Dictionary(grouping: items) { $0.clinicID ?? "" }
+        return grouped
+            .map { (clinicID, items) in
+                (clinicID: clinicID,
+                 qty: items.map { $0.quantity }.reduce(0, +))
+            }
+            .sorted { $0.qty > $1.qty }
+    }
+}
+
+/// Card display for one aggregate row. Tapping is a no-op for now —
+/// detail screens for aggregate items would require multi-clinic
+/// editing flows we haven't designed yet. Admin can switch to a
+/// specific clinic to view/edit a particular item.
+struct AggregateInventoryRowView: View {
+    let row: AggregatedInventoryRow
+
+    @State private var clinicNames: [String: String] = [:]
+
+    private var totalColor: Color {
+        if row.isOut { return AppColors.danger }
+        if row.isLow { return AppColors.warning }
+        return AppColors.textPrimary
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: AppSpacing.sm) {
+            HStack(alignment: .top, spacing: AppSpacing.md) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(row.displayName)
+                        .font(AppFonts.bodySemibold)
+                        .foregroundColor(AppColors.textPrimary)
+                        .lineLimit(2)
+                    HStack(spacing: AppSpacing.xs) {
+                        if !row.lotNumber.isEmpty {
+                            Text("Lot \(row.lotNumber)")
+                                .font(AppFonts.footnote)
+                                .foregroundColor(AppColors.textSecondary)
+                            Text("·")
+                                .foregroundColor(AppColors.textTertiary)
+                        }
+                        Text(row.hcpcsCode)
+                            .font(AppFonts.footnote)
+                            .foregroundColor(AppColors.textSecondary)
+                    }
+                }
+
+                Spacer()
+
+                VStack(alignment: .trailing, spacing: 0) {
+                    Text("\(row.totalQuantity)")
+                        .font(AppFonts.title3)
+                        .foregroundColor(totalColor)
+                    Text("total")
+                        .font(AppFonts.footnote)
+                        .foregroundColor(AppColors.textTertiary)
+                }
+            }
+
+            // Per-clinic breakdown chip row
+            FlexibleHStack(spacing: AppSpacing.xs) {
+                ForEach(row.perClinicBreakdown, id: \.clinicID) { entry in
+                    clinicChip(
+                        clinicName: clinicNames[entry.clinicID] ?? "…",
+                        qty: entry.qty
+                    )
+                }
+            }
+        }
+        .padding(AppSpacing.md)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: AppRadius.medium)
+                .fill(AppColors.cardBackground)
+        )
+        .task {
+            await loadClinicNames()
+        }
+    }
+
+    private func clinicChip(clinicName: String, qty: Int) -> some View {
+        HStack(spacing: 4) {
+            Text(clinicName)
+                .font(AppFonts.footnote)
+                .foregroundColor(AppColors.textSecondary)
+            Text("\(qty)")
+                .font(AppFonts.footnoteMedium)
+                .foregroundColor(AppColors.textPrimary)
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .background(
+            Capsule().fill(AppColors.border.opacity(0.3))
+        )
+    }
+
+    /// Resolve the clinicID → clinic name mapping for the breakdown
+    /// chips. Cache so we don't re-fetch on every redraw.
+    private func loadClinicNames() async {
+        let neededIDs = Set(row.perClinicBreakdown.map { $0.clinicID })
+            .subtracting(clinicNames.keys)
+        guard !neededIDs.isEmpty else { return }
+
+        for clinicID in neededIDs where !clinicID.isEmpty {
+            if let clinic = try? await DatabaseService.shared.getClinic(clinicID: clinicID) {
+                await MainActor.run {
+                    self.clinicNames[clinicID] = clinic.name
+                }
+            }
+        }
+    }
+}
+
+/// Simple flexible horizontal stack that wraps to multiple lines.
+/// Used for the clinic-chip breakdown row when there are many clinics.
+struct FlexibleHStack<Content: View>: View {
+    let spacing: CGFloat
+    @ViewBuilder let content: () -> Content
+
+    var body: some View {
+        // For now, use a simple wrap-by-lazy-grid. Won't perfectly
+        // pack chips of varying widths but is good enough for 3-10
+        // clinics, which is realistic.
+        LazyVGrid(
+            columns: [GridItem(.adaptive(minimum: 90), spacing: spacing)],
+            alignment: .leading,
+            spacing: spacing
+        ) {
+            content()
         }
     }
 }

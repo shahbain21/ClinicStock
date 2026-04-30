@@ -157,6 +157,97 @@ class DatabaseService {
     }
 
     // ══════════════════════════════════════════════════════
+    // MARK: - AGGREGATE INVENTORY (cross-clinic)
+    //
+    // Used by platform admin's "All Clinics" view. Fetches inventory
+    // from every active clinic in parallel. Each item still carries
+    // its own clinicID (preserved from the source document), so the
+    // caller can group by clinic for display.
+    //
+    // Not a listener — listeners are per-collection in Firestore, and
+    // we'd need one per clinic to keep up. For aggregate view that
+    // overhead isn't worth it. Reload on pull-to-refresh instead.
+    // ══════════════════════════════════════════════════════
+
+    func getAllInventoryAcrossClinics() async throws -> [InventoryItem] {
+        let clinics = try await getAllClinics()
+
+        // Fetch every clinic's items concurrently. TaskGroup keeps the
+        // total wall-time roughly equal to the slowest single fetch
+        // rather than the sum of all fetches.
+        return try await withThrowingTaskGroup(of: [InventoryItem].self) { group in
+            for clinic in clinics {
+                guard let clinicID = clinic.id else { continue }
+                group.addTask {
+                    let snapshot = try await self.itemsCollection(clinicID: clinicID)
+                        .getDocuments()
+                    return snapshot.documents.compactMap {
+                        try? $0.data(as: InventoryItem.self)
+                    }
+                }
+            }
+
+            var combined: [InventoryItem] = []
+            for try await items in group {
+                combined.append(contentsOf: items)
+            }
+            return combined
+        }
+    }
+
+    // ══════════════════════════════════════════════════════
+    // MARK: - AGGREGATE HISTORY (cross-clinic)
+    //
+    // Used by platform admin's "All Clinics" history view. Same
+    // pagination semantics as getClinicLogsPage but no clinicID filter.
+    //
+    // NOTE: The composite index for (action + timestamp DESC) without
+    // clinicID will need to be created the first time you filter by
+    // action in aggregate mode. Firestore prints the URL on the first
+    // failed query.
+    // ══════════════════════════════════════════════════════
+
+    func getAllLogsPage(
+        pageSize: Int = 50,
+        startAfter: DocumentSnapshot? = nil,
+        actions: [String]? = nil,
+        updateType: String? = nil
+    ) async throws -> LogsPage {
+        var query: Query = db.collection("historyLogs")
+
+        if let actions = actions, !actions.isEmpty {
+            query = query.whereField("action", in: Array(actions.prefix(10)))
+        }
+
+        if let updateType = updateType {
+            query = query.whereField("updateType", isEqualTo: updateType)
+        }
+
+        query = query
+            .order(by: "timestamp", descending: true)
+            .limit(to: pageSize)
+
+        if let cursor = startAfter {
+            query = query.start(afterDocument: cursor)
+        }
+
+        let snapshot = try await query.getDocuments()
+
+        let logs = snapshot.documents.compactMap {
+            try? $0.data(as: HistoryLog.self)
+        }
+
+        let lastDoc: DocumentSnapshot?
+        if snapshot.documents.count < pageSize {
+            lastDoc = nil
+        } else {
+            lastDoc = snapshot.documents.last
+        }
+
+        return LogsPage(logs: logs, lastDocument: lastDoc)
+    }
+
+    // ══════════════════════════════════════════════════════
     // MARK: - HCPCS CATALOG
     // Path: hcpcsCatalog/{hcpcsCode}
     // Global — shared across all clinics
@@ -269,16 +360,83 @@ class DatabaseService {
         try await addLog(log, clinicID: clinicID)
     }
 
-    func getClinicLogs(clinicID: String, limit: Int = 50) async throws -> [HistoryLog] {
-        let snapshot = try await db.collection("historyLogs")
-            .whereField("clinicID", isEqualTo: clinicID)
-            .order(by: "timestamp", descending: true)
-            .limit(to: limit)
-            .getDocuments()
+    // ── Paginated clinic logs ──
+    //
+    // Returns a page of logs plus the last document in the page, which
+    // the caller passes back in on the next call to get the next page.
+    // The non-paginated overload below is kept for callers that just
+    // need the most recent N logs (e.g. Dashboard recent activity).
+    struct LogsPage {
+        let logs: [HistoryLog]
+        let lastDocument: DocumentSnapshot?
 
-        return snapshot.documents.compactMap {
+        var hasMore: Bool {
+            // If we got as many docs as requested, there's probably more.
+            // Cheaper than a separate count query. Caller can stop paging
+            // when a Load More returns fewer than `pageSize`.
+            return lastDocument != nil
+        }
+    }
+
+    func getClinicLogsPage(
+        clinicID: String,
+        pageSize: Int = 50,
+        startAfter: DocumentSnapshot? = nil,
+        actions: [String]? = nil,
+        updateType: String? = nil
+    ) async throws -> LogsPage {
+        var query: Query = db.collection("historyLogs")
+            .whereField("clinicID", isEqualTo: clinicID)
+
+        // Optional filter by action types (for the filter pills).
+        // Firestore 'in' supports up to 10 values.
+        if let actions = actions, !actions.isEmpty {
+            query = query.whereField("action", in: Array(actions.prefix(10)))
+        }
+
+        // Optional finer-grained filter for the quantityUpdate split.
+        // Only logs written after we started denormalizing this field
+        // will match — older logs lack it, so they'll be invisible when
+        // the caller filters on updateType. Acceptable: Checkouts /
+        // Restocks pills are forward-looking.
+        if let updateType = updateType {
+            query = query.whereField("updateType", isEqualTo: updateType)
+        }
+
+        query = query
+            .order(by: "timestamp", descending: true)
+            .limit(to: pageSize)
+
+        if let cursor = startAfter {
+            query = query.start(afterDocument: cursor)
+        }
+
+        let snapshot = try await query.getDocuments()
+
+        let logs = snapshot.documents.compactMap {
             try? $0.data(as: HistoryLog.self)
         }
+
+        // If we got fewer results than the page size, there's no more
+        // data — signal that by returning nil for the cursor.
+        let lastDoc: DocumentSnapshot?
+        if snapshot.documents.count < pageSize {
+            lastDoc = nil
+        } else {
+            lastDoc = snapshot.documents.last
+        }
+
+        return LogsPage(logs: logs, lastDocument: lastDoc)
+    }
+
+    // Legacy overload — returns a flat array, used by places that only
+    // want the most recent N (Dashboard, ItemDetail).
+    func getClinicLogs(clinicID: String, limit: Int = 50) async throws -> [HistoryLog] {
+        let page = try await getClinicLogsPage(
+            clinicID: clinicID,
+            pageSize: limit
+        )
+        return page.logs
     }
 
     func getItemLogs(
@@ -377,25 +535,23 @@ class DatabaseService {
     // MARK: - INVITATIONS
     // Path: invitations/{normalized-email}
     //
-    // Keyed by email (lowercased, trimmed) because:
+    // Document ID is the lowercased, trimmed email — used directly
+    // (Firestore document IDs do allow '.', so no encoding needed).
+    //
+    // Keyed by email because:
     //  1. A single pending invitation per email prevents accidental
     //     duplicates when re-inviting.
-    //  2. checkAndAcceptInvitation on sign-in needs to look up by email
-    //     (the only thing we know about a user at auth time).
-    //
-    // Firestore document IDs can't contain '.', '#', '$', '[', or ']'
-    // — but email addresses regularly contain '.'. We percent-encode
-    // the dot when deriving the document ID. Reads/writes go through
-    // a helper so callers use plain emails.
+    //  2. checkAndAcceptInvitation on sign-in needs to look up by
+    //     email (the only thing we know about a user at auth time).
     // ══════════════════════════════════════════════════════
 
+    /// Normalize an email into the form used as an invitation doc ID.
+    /// All read/write paths must use this so they all hit the same
+    /// document.
     private func invitationDocID(for email: String) -> String {
-        let normalized = email
+        return email
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased()
-        // Only the dot is problematic in practice for valid emails.
-        // Use %2E so the encoding is stable and round-trippable.
-        return normalized.replacingOccurrences(of: ".", with: "%2E")
     }
 
     func getInvitation(email: String) async throws -> Invitation? {
@@ -469,14 +625,48 @@ class DatabaseService {
     // ══════════════════════════════════════════════════════
 
     func getAllClinics() async throws -> [Clinic] {
+        // No filtering on the query side — fetches ALL clinics, then
+        // filters and sorts in memory. This avoids needing a Firestore
+        // composite index for (isActive==true + order by name), which
+        // is overkill for the small number of clinics any one platform
+        // admin will have.
+        //
+        // If clinic count grows past hundreds, switch back to a query-
+        // side filter and create the composite index. Until then this
+        // is faster end-to-end (one round trip, no index build).
         let snapshot = try await db.collection("clinics")
-            .whereField("isActive", isEqualTo: true)
-            .order(by: "name")
             .getDocuments()
 
-        return snapshot.documents.compactMap {
-            try? $0.data(as: Clinic.self)
-        }
+        return snapshot.documents
+            .compactMap { try? $0.data(as: Clinic.self) }
+            .filter { $0.isActive }
+            .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+    }
+
+    /// Includes archived (isActive == false) clinics. Only platform
+    /// admin should call this — the Manage Clinics screen needs to
+    /// see archived clinics so admin can restore them. Regular flows
+    /// (picker, switching) use the filtered version above.
+    func getAllClinicsIncludingArchived() async throws -> [Clinic] {
+        let snapshot = try await db.collection("clinics")
+            .getDocuments()
+
+        return snapshot.documents
+            .compactMap { try? $0.data(as: Clinic.self) }
+            .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+    }
+
+    /// Returns clinics that have been archived (soft-deleted). Used by
+    /// the "Archived Clinics" admin screen to list candidates for
+    /// restoration.
+    func getArchivedClinics() async throws -> [Clinic] {
+        let snapshot = try await db.collection("clinics")
+            .getDocuments()
+
+        return snapshot.documents
+            .compactMap { try? $0.data(as: Clinic.self) }
+            .filter { !$0.isActive }
+            .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
     }
 
     func getClinic(clinicID: String) async throws -> Clinic? {
@@ -502,5 +692,84 @@ class DatabaseService {
             .document("sizes")
             .getDocument()
         return doc.data()?["list"] as? [String] ?? []
+    }
+
+    /// Global default low-stock threshold. Used as the initial value
+    /// when adding a new inventory item — existing items keep their
+    /// own per-item threshold and aren't affected when this changes.
+    ///
+    /// Returns 10 if no value has been saved yet (sensible default
+    /// matching the old hardcoded value in AddItemView).
+    func getLowStockDefault() async throws -> Int {
+        let doc = try await db.collection("settings")
+            .document("lowStockDefault")
+            .getDocument()
+        return doc.data()?["value"] as? Int ?? 10
+    }
+
+    func setLowStockDefault(_ value: Int) async throws {
+        try await db.collection("settings")
+            .document("lowStockDefault")
+            .setData(["value": value], merge: true)
+        print("Low stock default updated: \(value)")
+    }
+
+    /// Bulk-update every inventory item across every active clinic to
+    /// the given threshold. Used when admin chooses "Apply to all items"
+    /// after changing the global default — the heavy-hammer version
+    /// that overwrites any per-item customization.
+    ///
+    /// Returns a tuple of (succeeded, failed) item counts so the UI
+    /// can report partial failures. Failures are usually permission
+    /// denials on a specific item, network blips, etc. — they don't
+    /// abort the whole operation, we just keep going.
+    ///
+    /// This uses Firestore batched writes (max 500 ops per batch) so
+    /// large clinics stay within transactional limits.
+    func applyLowStockThresholdToAllItems(_ threshold: Int) async throws -> (succeeded: Int, failed: Int) {
+        let clinics = try await getAllClinics()
+        var succeeded = 0
+        var failed = 0
+
+        for clinic in clinics {
+            guard let clinicID = clinic.id else { continue }
+
+            do {
+                let snapshot = try await itemsCollection(clinicID: clinicID)
+                    .getDocuments()
+
+                // Firestore batches max 500 writes. Chunk if needed.
+                let chunks = stride(from: 0, to: snapshot.documents.count, by: 500).map {
+                    Array(snapshot.documents[$0..<min($0 + 500, snapshot.documents.count)])
+                }
+
+                for chunk in chunks {
+                    let batch = db.batch()
+                    for doc in chunk {
+                        batch.updateData([
+                            "lowStockThreshold": threshold,
+                            "lastUpdated": Timestamp(date: Date())
+                        ], forDocument: doc.reference)
+                    }
+
+                    do {
+                        try await batch.commit()
+                        succeeded += chunk.count
+                    } catch {
+                        print("Batch commit failed for clinic \(clinicID): \(error)")
+                        failed += chunk.count
+                    }
+                }
+
+                print("Updated \(snapshot.documents.count) items in clinic \(clinicID)")
+
+            } catch {
+                print("Couldn't read items for clinic \(clinicID): \(error)")
+                // We don't know how many would have been updated, so
+                // can't increment failed by a known count. Move on.
+            }
+        }
+
+        return (succeeded: succeeded, failed: failed)
     }
 }

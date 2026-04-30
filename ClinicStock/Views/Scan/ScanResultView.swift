@@ -27,7 +27,10 @@ import SwiftUI
 
 enum ScanOutcome {
     case itemInStock(InventoryItem)
-    case catalogOnly(HCPCSCatalogItem, gtin: String?)
+    /// Catalog match. `parsed` carries lot number, expiry, etc. from
+    /// the same GS1 scan so they don't need to be entered manually
+    /// when admin taps "Add to Inventory."
+    case catalogOnly(HCPCSCatalogItem, gtin: String?, parsed: ParsedBarcode?)
     case unmatchedGTIN(gtin: String, parsed: ParsedBarcode)
     case notFound(scannedValue: String)
 }
@@ -120,7 +123,7 @@ struct ScanResultView: View {
         switch result {
         case .itemInStock(let item):
             inStockCard(item: item)
-        case .catalogOnly(let catalog, _):
+        case .catalogOnly(let catalog, _, _):
             catalogOnlyCard(catalog: catalog)
         case .unmatchedGTIN(let gtin, let parsed):
             unmatchedGTINCard(gtin: gtin, parsed: parsed)

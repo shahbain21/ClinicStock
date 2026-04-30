@@ -295,7 +295,7 @@ struct UserManagementView: View {
     // ══════════════════════════════════════════════════════
 
     private func loadUsers() {
-        guard let clinicID = authManager.currentUser?.clinicID else { return }
+        guard let clinicID = authManager.effectiveClinicID else { return }
         Task {
             await userManager.loadUsers(clinicID: clinicID)
             if showDeactivatedUsers {
@@ -305,7 +305,7 @@ struct UserManagementView: View {
     }
 
     private func loadDeactivated() async {
-        guard let clinicID = authManager.currentUser?.clinicID else { return }
+        guard let clinicID = authManager.effectiveClinicID else { return }
         do {
             let users = try await DatabaseService.shared.getDeactivatedClinicUsers(clinicID: clinicID)
             deactivatedUsers = users.sorted { $0.displayName < $1.displayName }
@@ -318,14 +318,15 @@ struct UserManagementView: View {
     private func changeRole(to role: AppUser.UserRole) {
         guard let user = selectedUser,
               let admin = authManager.currentUser,
-              let userID = user.id
+              let userID = user.id,
+              let clinicID = authManager.effectiveClinicID
         else { return }
 
         Task {
             try? await userManager.updateUserRole(
                 userID: userID,
                 newRole: role,
-                clinicID: admin.clinicID,
+                clinicID: clinicID,
                 by: admin
             )
             selectedUser = nil
@@ -333,11 +334,12 @@ struct UserManagementView: View {
     }
 
     private func performCancelInvitation(email: String) {
-        guard let admin = authManager.currentUser else { return }
+        guard let admin = authManager.currentUser,
+              let clinicID = authManager.effectiveClinicID else { return }
         Task {
             try? await userManager.cancelInvitation(
                 email: email,
-                clinicID: admin.clinicID,
+                clinicID: clinicID,
                 by: admin
             )
         }
@@ -346,13 +348,14 @@ struct UserManagementView: View {
     private func deactivateUser() {
         guard let user = selectedUser,
               let admin = authManager.currentUser,
-              let userID = user.id
+              let userID = user.id,
+              let clinicID = authManager.effectiveClinicID
         else { return }
 
         Task {
             try? await userManager.deactivateUser(
                 userID: userID,
-                clinicID: admin.clinicID,
+                clinicID: clinicID,
                 by: admin
             )
             selectedUser = nil
@@ -365,13 +368,14 @@ struct UserManagementView: View {
     private func reactivateUser() {
         guard let user = selectedUser,
               let admin = authManager.currentUser,
-              let userID = user.id
+              let userID = user.id,
+              let clinicID = authManager.effectiveClinicID
         else { return }
 
         Task {
             try? await userManager.reactivateUser(
                 userID: userID,
-                clinicID: admin.clinicID,
+                clinicID: clinicID,
                 by: admin
             )
             selectedUser = nil

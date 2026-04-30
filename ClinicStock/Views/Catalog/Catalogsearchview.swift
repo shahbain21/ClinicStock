@@ -302,7 +302,7 @@ struct CatalogSearchView: View {
     private func handleScan(value: String) async {
         let result = await searchService.lookupBarcode(value)
         switch result {
-        case .found(let item, _):
+        case .found(let item, _, _):
             selectedItem = item
 
         case .gtinNotFound(let gtin, _):

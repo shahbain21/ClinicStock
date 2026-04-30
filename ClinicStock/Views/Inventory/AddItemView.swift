@@ -46,7 +46,7 @@ struct AddItemView: View {
         _lotNumber = State(initialValue: prefillLotNumber ?? "")
         _size = State(initialValue: "Universal")
         _barcode = State(initialValue: prefillBarcode ?? "")
-        _quantity = State(initialValue: "0")
+        _quantity = State(initialValue: "1")
         _threshold = State(initialValue: "10")
         _category = State(initialValue: prefillCategory ?? "General Medical")
         _manufacturer = State(initialValue: "")
@@ -253,6 +253,17 @@ struct AddItemView: View {
             categories = try await DatabaseService.shared.getCategories()
             sizes = try await DatabaseService.shared.getSizes()
 
+            // Apply the saved global low-stock default — only for new
+            // items, never for edits. We detect "new item with default
+            // threshold still showing" by checking that we're not in
+            // edit mode AND the user hasn't already changed it from
+            // the hardcoded "10" we initialized to.
+            if editingItem == nil && threshold == "10" {
+                if let savedDefault = try? await DatabaseService.shared.getLowStockDefault() {
+                    threshold = "\(savedDefault)"
+                }
+            }
+
             // If the pre-filled value isn't in the loaded lists (e.g.
             // category came from a catalog scan but admin removed it from
             // settings), keep it in the picker anyway.
@@ -316,7 +327,8 @@ struct AddItemView: View {
                         manufacturer: trimmedManuf,
                         notes: notes,
                         unitCost: cost,
-                        by: user
+                        by: user,
+                        clinicID: authManager.effectiveClinicID
                     )
                 }
 
@@ -399,7 +411,8 @@ struct AddItemView: View {
             itemID: itemID,
             updates: updates,
             changeDescription: description,
-            by: user
+            by: user,
+            clinicID: authManager.effectiveClinicID
         )
     }
 }

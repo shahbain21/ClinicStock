@@ -182,21 +182,21 @@ class HCPCSSearchService: ObservableObject {
                 if let gtin = parsed.gtin, !(item.gtins?.contains(gtin) ?? false) {
                     Task { await confirmAndSaveGTIN(gtin: gtin, forItem: item) }
                 }
-                return .found(item, gtin: parsed.gtin)
+                return .found(item, gtin: parsed.gtin, parsed: parsed)
             }
         }
 
         // GTIN lookup — check local catalog first
         if let gtin = parsed.gtin {
             if let item = catalog.first(where: { $0.gtins?.contains(gtin) == true }) {
-                return .found(item, gtin: gtin)
+                return .found(item, gtin: gtin, parsed: parsed)
             }
 
             // Not in local catalog — check Firestore
             do {
                 if let item = try await dbService.getCatalogItemByGTIN(gtin: gtin) {
                     cacheItem(item)
-                    return .found(item, gtin: gtin)
+                    return .found(item, gtin: gtin, parsed: parsed)
                 }
             } catch {
                 print("GTIN Firestore lookup error: \(error)")
@@ -475,7 +475,11 @@ class HCPCSSearchService: ObservableObject {
 // ══════════════════════════════════════════════════════
 
 enum BarcodeSearchResult {
-    case found(HCPCSCatalogItem, gtin: String?)
+    /// Catalog match. `gtin` is the GTIN that matched (if the scan
+    /// included one). `parsed` is the full GS1 parse result, which
+    /// callers can use to extract lot number, expiry, etc. from the
+    /// same scan instead of asking the user to re-scan.
+    case found(HCPCSCatalogItem, gtin: String?, parsed: ParsedBarcode?)
     case gtinNotFound(gtin: String, parsed: ParsedBarcode)
     case unrecognized
 }

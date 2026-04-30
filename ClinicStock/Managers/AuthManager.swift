@@ -44,6 +44,64 @@ class AuthManager: ObservableObject {
     @Published var currentClinic: Clinic?
     @Published var errorMessage: String?
 
+    // Platform-admin session state.
+    //
+    // For a platform admin (role == .admin, clinicID == nil), this is
+    // the clinic they're currently "acting as" during this session. For
+    // everyone else it's ignored — use `effectiveClinicID` to resolve.
+    //
+    // Persisted to UserDefaults so an admin doesn't have to re-pick on
+    // every app launch.
+    @Published var selectedClinicID: String? = nil {
+        didSet {
+            if let clinicID = selectedClinicID {
+                UserDefaults.standard.set(clinicID, forKey: Self.selectedClinicKey)
+            } else {
+                UserDefaults.standard.removeObject(forKey: Self.selectedClinicKey)
+            }
+        }
+    }
+
+    /// Platform admin "All Clinics" view. When true, the admin is in
+    /// aggregate mode — viewing data summed across all clinics rather
+    /// than scoped to one. effectiveClinicID returns nil in this mode,
+    /// so any view that requires a specific clinic context (Add Item,
+    /// Scan, etc.) should disable its write actions.
+    @Published var isAggregateMode: Bool = false {
+        didSet {
+            UserDefaults.standard.set(isAggregateMode, forKey: Self.aggregateModeKey)
+        }
+    }
+
+    /// The clinic ID to use for data queries. For platform admins this
+    /// is whatever they selected from the clinic picker. For everyone
+    /// else it's their own clinicID (they have no choice).
+    ///
+    /// Returns nil for:
+    ///   - A platform admin who hasn't selected a clinic yet
+    ///   - A platform admin in aggregate "All Clinics" mode
+    ///   - A non-admin user whose profile has no clinicID (shouldn't
+    ///     happen — defensive)
+    var effectiveClinicID: String? {
+        if let user = currentUser, user.isPlatformAdmin {
+            if isAggregateMode { return nil }
+            return selectedClinicID
+        }
+        return currentUser?.clinicID
+    }
+
+    /// Convenience — true when the current user is a platform admin.
+    var isPlatformAdmin: Bool {
+        return currentUser?.isPlatformAdmin ?? false
+    }
+
+    /// True when a platform admin is logged in but hasn't picked a
+    /// clinic OR aggregate mode yet. RootView uses this to route to
+    /// the picker.
+    var needsClinicSelection: Bool {
+        return isPlatformAdmin && selectedClinicID == nil && !isAggregateMode
+    }
+
     private let db = Firestore.firestore()
     private var authListener: AuthStateDidChangeListenerHandle?
 
@@ -51,6 +109,8 @@ class AuthManager: ObservableObject {
     private var currentNonce: String?
 
     private static let savedEmailKey = "savedEmail"
+    private static let selectedClinicKey = "selectedClinicID"
+    private static let aggregateModeKey = "isAggregateMode"
 
     // ══════════════════════════════════════════════════════
     // MARK: - Init
@@ -94,6 +154,8 @@ class AuthManager: ObservableObject {
                 Task { @MainActor in
                     self.currentUser = nil
                     self.currentClinic = nil
+                    self.selectedClinicID = nil
+                    self.isAggregateMode = false
                     self.isAuthenticated = false
                     self.isLoading = false
                 }
@@ -240,13 +302,33 @@ class AuthManager: ObservableObject {
             throw AuthError.invalidJoinInput
         }
 
-        // Create the Auth account
-        let result = try await Auth.auth().createUser(
-            withEmail: normalizedEmail,
-            password: password
-        )
-        let uid = result.user.uid
-        print("Join: auth account created \(uid)")
+        // Try to create an Auth account. If that fails because the
+        // account already exists (which happens when a prior Join
+        // attempt failed and left an orphaned Auth account behind —
+        // see comment on the rollback below), try signing in instead.
+        // The same password they're typing now should work as long as
+        // it matches what they used last time.
+        //
+        // This recovery means an invitee who got stuck partway through
+        // a previous attempt can finish the Join in one tap rather than
+        // needing Forgot Password or admin intervention.
+        let uid: String
+        do {
+            let result = try await Auth.auth().createUser(
+                withEmail: normalizedEmail,
+                password: password
+            )
+            uid = result.user.uid
+            print("Join: new auth account created \(uid)")
+        } catch let error as NSError where error.code == AuthErrorCode.emailAlreadyInUse.rawValue {
+            print("Join: auth account exists, trying sign-in")
+            let result = try await Auth.auth().signIn(
+                withEmail: normalizedEmail,
+                password: password
+            )
+            uid = result.user.uid
+            print("Join: signed into existing auth account \(uid)")
+        }
 
         // Check for an invitation
         let accepted = await UserManager.checkAndAcceptInvitation(
@@ -262,10 +344,13 @@ class AuthManager: ObservableObject {
             return
         }
 
-        // No invitation — roll back the Auth account so the user can
-        // retry with the same email after being invited.
-        print("Join: no invitation found, rolling back auth account")
-        try? await result.user.delete()
+        // No invitation — try to roll back. Note this is best-effort:
+        // Firebase requires recent authentication for delete(), and
+        // depending on timing this can silently fail. Failed rollback
+        // means a stale Auth account stays in Firebase, which is why
+        // we have the createUser-or-signIn fallback above.
+        print("Join: no invitation found, attempting auth account rollback")
+        try? await Auth.auth().currentUser?.delete()
         try? Auth.auth().signOut()
 
         throw AuthError.noInvitation
@@ -294,13 +379,34 @@ class AuthManager: ObservableObject {
                     return
                 }
 
-                let clinicDoc = try await db.collection("clinics")
-                    .document(user.clinicID)
-                    .getDocument()
-                let clinic = try? clinicDoc.data(as: Clinic.self)
-
                 self.currentUser = user
-                self.currentClinic = clinic
+
+                // Branch on user type:
+                //   Platform admin (clinicID == nil):
+                //     Restore any previously-selected clinic from
+                //     UserDefaults. If none, RootView will route to
+                //     ClinicPickerView via needsClinicSelection.
+                //   Clinic user (clinicID set):
+                //     Load their single clinic as always.
+                if user.isPlatformAdmin {
+                    let restored = UserDefaults.standard.string(
+                        forKey: Self.selectedClinicKey
+                    )
+                    let restoredAggregate = UserDefaults.standard.bool(
+                        forKey: Self.aggregateModeKey
+                    )
+                    self.selectedClinicID = restored
+                    self.isAggregateMode = restoredAggregate
+
+                    if let clinicID = restored {
+                        await loadCurrentClinic(clinicID: clinicID)
+                    } else {
+                        self.currentClinic = nil
+                    }
+                } else if let clinicID = user.clinicID {
+                    await loadCurrentClinic(clinicID: clinicID)
+                }
+
                 self.isAuthenticated = true
                 self.isLoading = false
                 self.errorMessage = nil
@@ -308,7 +414,7 @@ class AuthManager: ObservableObject {
                 print("Profile loaded:")
                 print("   Name: \(user.displayName)")
                 print("   Role: \(user.role.rawValue)")
-                print("   Clinic: \(clinic?.name ?? "Unknown")")
+                print("   Clinic: \(self.currentClinic?.name ?? (user.isPlatformAdmin ? "[platform admin, no selection]" : "Unknown"))")
                 return
             }
 
@@ -338,6 +444,195 @@ class AuthManager: ObservableObject {
             print("Error loading profile: \(error)")
             self.isLoading = false
             self.errorMessage = error.localizedDescription
+        }
+    }
+
+    // ══════════════════════════════════════════════════════
+    // MARK: - Clinic Selection (platform admin)
+    //
+    // Platform admins don't have a clinicID on their user record;
+    // instead they pick one per session from the available clinics.
+    // These helpers persist the selection + load the clinic doc.
+    // ══════════════════════════════════════════════════════
+
+    /// Set the active clinic for a platform admin and load its doc.
+    /// Silently no-ops for non-admin users (they can't switch clinics).
+    func selectClinic(_ clinicID: String) async {
+        guard isPlatformAdmin else {
+            print("selectClinic called by non-platform-admin — ignoring")
+            return
+        }
+        self.isAggregateMode = false
+        self.selectedClinicID = clinicID
+        await loadCurrentClinic(clinicID: clinicID)
+    }
+
+    /// Enter aggregate "All Clinics" mode for a platform admin.
+    /// Inventory listener stops, dashboard switches to cross-clinic
+    /// summary, write actions in single-clinic views become disabled.
+    func selectAggregateMode() {
+        guard isPlatformAdmin else {
+            print("selectAggregateMode called by non-platform-admin — ignoring")
+            return
+        }
+        self.selectedClinicID = nil
+        self.currentClinic = nil
+        self.isAggregateMode = true
+    }
+
+    /// Clear the platform admin's clinic selection. Sends them back to
+    /// the clinic picker on next render.
+    func clearClinicSelection() {
+        guard isPlatformAdmin else { return }
+        self.selectedClinicID = nil
+        self.currentClinic = nil
+        self.isAggregateMode = false
+    }
+
+    /// Fetch a Clinic document and publish it as currentClinic.
+    /// Safe to call from any authenticated context — does nothing on
+    /// failure (leaves currentClinic at its prior value).
+    private func loadCurrentClinic(clinicID: String) async {
+        do {
+            let clinicDoc = try await db.collection("clinics")
+                .document(clinicID)
+                .getDocument()
+            if let clinic = try? clinicDoc.data(as: Clinic.self) {
+                self.currentClinic = clinic
+            } else {
+                print("Clinic doc exists but couldn't decode: \(clinicID)")
+            }
+        } catch {
+            print("Failed to load clinic \(clinicID): \(error)")
+        }
+    }
+
+    // ══════════════════════════════════════════════════════
+    // MARK: - Create New Clinic (platform admin only)
+    //
+    // Adds a new clinic doc owned by the calling platform admin. Unlike
+    // registerClinic (which creates clinic + admin in one Auth account
+    // creation), this assumes the admin already exists and just spins
+    // up another location.
+    //
+    // The new clinic has no users initially. The admin can invite a
+    // manager / staff once they're inside the clinic. (User-creation
+    // is intentionally separate to keep this flow simple.)
+    //
+    // Returns the new clinic's ID so callers can navigate to it or
+    // offer "switch to this clinic now?".
+    // ══════════════════════════════════════════════════════
+
+    func createClinic(
+        name: String,
+        address: String,
+        city: String,
+        state: String,
+        zip: String,
+        phone: String,
+        email: String
+    ) async throws -> String {
+        guard isPlatformAdmin else {
+            throw AuthError.invalidRegistrationInput
+        }
+        guard let uid = currentUser?.id else {
+            throw AuthError.invalidRegistrationInput
+        }
+
+        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedName.isEmpty else {
+            throw AuthError.invalidRegistrationInput
+        }
+
+        let clinicRef = db.collection("clinics").document()
+        let clinicID = clinicRef.documentID
+
+        try await clinicRef.setData([
+            "name": trimmedName,
+            "address": address.trimmingCharacters(in: .whitespacesAndNewlines),
+            "city": city.trimmingCharacters(in: .whitespacesAndNewlines),
+            "state": state.trimmingCharacters(in: .whitespacesAndNewlines),
+            "zip": zip.trimmingCharacters(in: .whitespacesAndNewlines),
+            "phone": phone.trimmingCharacters(in: .whitespacesAndNewlines),
+            "email": Self.normalizeEmail(email),
+            // managerID points at the platform admin so the rules' create
+            // check passes. The admin isn't actually "manager" in role
+            // terms — they're platform admin owning this clinic.
+            "managerID": uid,
+            "isActive": true,
+            "dateCreated": Timestamp(date: Date())
+        ])
+
+        print("Platform admin created new clinic: \(clinicID)")
+        return clinicID
+    }
+
+    // ══════════════════════════════════════════════════════
+    // MARK: - Archive / Restore Clinic (platform admin only)
+    //
+    // Soft-delete pattern: the clinic doc stays in Firestore but is
+    // hidden from the picker, the All Clinics aggregate view, and
+    // any flow that uses getAllClinics(). Archived clinics retain
+    // their inventory, history, and users — restore brings them all
+    // back without data loss.
+    //
+    // Hard delete is intentionally NOT supported. Removing a clinic
+    // entirely orphans its inventory and history logs, which we
+    // want to keep for audit/compliance regardless of operational
+    // status.
+    //
+    // Important constraint: an admin cannot archive the clinic they
+    // are currently viewing. They must switch to a different clinic
+    // (or All Clinics) first. This prevents the awkward state where
+    // the active clinic disappears mid-action.
+    // ══════════════════════════════════════════════════════
+
+    func archiveClinic(_ clinicID: String) async throws {
+        guard isPlatformAdmin else {
+            throw AuthError.invalidRegistrationInput
+        }
+        guard !clinicID.isEmpty else {
+            throw AuthError.invalidRegistrationInput
+        }
+
+        // Block archiving the currently-active clinic. Caller (the
+        // Manage Clinics screen) should disable the button in this
+        // state, but we double-check here as a safety net.
+        if selectedClinicID == clinicID {
+            throw ClinicError.cannotArchiveActiveClinic
+        }
+
+        try await db.collection("clinics")
+            .document(clinicID)
+            .updateData(["isActive": false])
+
+        print("Archived clinic: \(clinicID)")
+    }
+
+    func restoreClinic(_ clinicID: String) async throws {
+        guard isPlatformAdmin else {
+            throw AuthError.invalidRegistrationInput
+        }
+        guard !clinicID.isEmpty else {
+            throw AuthError.invalidRegistrationInput
+        }
+
+        try await db.collection("clinics")
+            .document(clinicID)
+            .updateData(["isActive": true])
+
+        print("Restored clinic: \(clinicID)")
+    }
+
+    /// Errors specific to clinic management actions.
+    enum ClinicError: LocalizedError {
+        case cannotArchiveActiveClinic
+
+        var errorDescription: String? {
+            switch self {
+            case .cannotArchiveActiveClinic:
+                return "Switch to a different clinic before archiving this one."
+            }
         }
     }
 
@@ -464,6 +759,8 @@ class AuthManager: ObservableObject {
             GIDSignIn.sharedInstance.signOut()
             currentUser = nil
             currentClinic = nil
+            selectedClinicID = nil  // clears UserDefaults via didSet
+            isAggregateMode = false
             isAuthenticated = false
             isLoading = false
             errorMessage = nil

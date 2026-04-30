@@ -18,6 +18,7 @@
 //
 
 import SwiftUI
+import FirebaseAuth
 
 struct JoinClinicView: View {
 
@@ -210,10 +211,26 @@ struct JoinClinicView: View {
                 dismiss()
             } catch {
                 let nsError = error as NSError
-                if nsError.code == 17007 {
-                    // Firebase error: EMAIL_EXISTS
-                    errorMessage = "An account with this email already exists. Try signing in from the login page."
-                } else {
+
+                // Print the full error so we can see what Firebase
+                // actually returned. The numeric code alone is rarely
+                // enough — the userInfo and message clarify the case.
+                print("[Join] error code=\(nsError.code) domain=\(nsError.domain)")
+                print("[Join] localizedDescription: \(nsError.localizedDescription)")
+                print("[Join] userInfo: \(nsError.userInfo)")
+
+                switch nsError.code {
+                case AuthErrorCode.emailAlreadyInUse.rawValue:
+                    errorMessage = "An account with this email already exists. Try the login page, or use Forgot Password to set a new password."
+                case AuthErrorCode.weakPassword.rawValue:
+                    errorMessage = "Password is too weak. Try a longer password with letters and numbers."
+                case AuthErrorCode.invalidEmail.rawValue:
+                    errorMessage = "That email doesn't look right. Double-check the spelling."
+                case AuthErrorCode.networkError.rawValue:
+                    errorMessage = "Network error. Check your connection and try again."
+                default:
+                    // Show the system-localized message — usually clearer
+                    // than a custom string when we don't recognize the code.
                     errorMessage = error.localizedDescription
                 }
                 isJoining = false

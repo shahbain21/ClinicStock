@@ -169,7 +169,8 @@ class UserManager: ObservableObject {
         let db = Firestore.firestore()
 
         do {
-            // Fetch the invitation
+            // Fetch the invitation. The doc ID is the raw normalized
+            // email (Firestore allows '.' in document IDs).
             let inviteDoc = try await db.collection("invitations")
                 .document(normalizedEmail)
                 .getDocument()

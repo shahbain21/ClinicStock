@@ -35,7 +35,19 @@ struct ScanTabView: View {
     @State private var itemForDetail: InventoryItem? = nil
 
     @State private var addItemPrefill: AddItemPrefill? = nil
-    @State private var gtinToLink: String? = nil
+
+    /// State for the GTIN-linking sheet. We store both the GTIN (the
+    /// catalog needs that as the link target) AND the original scan's
+    /// parsed barcode (lot number, etc.) so we can carry it through
+    /// to AddItemView after linking completes — saving the user from
+    /// having to scan a second time just to add the item to inventory.
+    @State private var pendingLinkContext: PendingLinkContext? = nil
+
+    struct PendingLinkContext: Identifiable {
+        let id = UUID()
+        let gtin: String
+        let parsed: ParsedBarcode?
+    }
 
     var body: some View {
         NavigationStack {
@@ -44,6 +56,8 @@ struct ScanTabView: View {
 
                 if isLookingUp {
                     lookingUpView
+                } else if authManager.isAggregateMode {
+                    aggregateDisabledState
                 } else if let result = scanResult {
                     ScanResultView(
                         result: result,
@@ -110,11 +124,15 @@ struct ScanTabView: View {
                 .environmentObject(authManager)
                 .environmentObject(inventoryManager)
             }
-            .sheet(item: $gtinToLink.asIdentifiableString) { identifiable in
+            .sheet(item: $pendingLinkContext) { context in
                 CatalogSearchView(
-                    initialPendingGTIN: identifiable.value,
+                    initialPendingGTIN: context.gtin,
                     onLinkComplete: { linkedGTIN, catalogItem in
-                        handleLinkComplete(gtin: linkedGTIN, item: catalogItem)
+                        handleLinkComplete(
+                            gtin: linkedGTIN,
+                            item: catalogItem,
+                            context: context
+                        )
                     }
                 )
                 .environmentObject(searchService)
@@ -168,6 +186,34 @@ struct ScanTabView: View {
         }
     }
 
+    /// Shown when platform admin is in "All Clinics" aggregate mode.
+    /// Scanning needs a specific clinic context (which clinic gets the
+    /// checkout? which clinic do we add new stock to?), so we guide
+    /// admin to switch clinics in Settings rather than presenting an
+    /// ambiguous flow.
+    private var aggregateDisabledState: some View {
+        VStack(spacing: AppSpacing.xl) {
+            Spacer()
+
+            Image(systemName: "barcode.viewfinder")
+                .font(.system(size: 64))
+                .foregroundColor(AppColors.textTertiary)
+
+            VStack(spacing: AppSpacing.sm) {
+                Text("Pick a Clinic to Scan")
+                    .font(AppFonts.title3)
+                    .foregroundColor(AppColors.textPrimary)
+                Text("Scanning needs a specific clinic context. Switch to one of your clinics in Settings to use the scanner.")
+                    .font(AppFonts.caption)
+                    .foregroundColor(AppColors.textSecondary)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, AppSpacing.xl)
+            }
+
+            Spacer()
+        }
+    }
+
     private var lookingUpView: some View {
         VStack(spacing: AppSpacing.lg) {
             ProgressView()
@@ -204,7 +250,7 @@ struct ScanTabView: View {
     // ══════════════════════════════════════════════════════
 
     private func lookup(scannedValue: String) async {
-        guard let clinicID = authManager.currentUser?.clinicID else { return }
+        guard let clinicID = authManager.effectiveClinicID else { return }
 
         isLookingUp = true
         defer { isLookingUp = false }
@@ -231,11 +277,11 @@ struct ScanTabView: View {
 
         let catalogResult = await searchService.lookupBarcode(scannedValue)
         switch catalogResult {
-        case .found(let catalogItem, let gtin):
+        case .found(let catalogItem, let gtin, let parsed):
             #if DEBUG
             print("[ScanTab] matched catalog: \(catalogItem.hcpcsCode)")
             #endif
-            scanResult = .catalogOnly(catalogItem, gtin: gtin)
+            scanResult = .catalogOnly(catalogItem, gtin: gtin, parsed: parsed)
 
         case .gtinNotFound(let gtin, let parsed):
             #if DEBUG
@@ -307,13 +353,13 @@ struct ScanTabView: View {
         scanResult = nil
 
         switch result {
-        case .catalogOnly(let catalog, let gtin):
+        case .catalogOnly(let catalog, let gtin, let parsed):
             addItemPrefill = AddItemPrefill(
                 name: catalog.displayName,
                 hcpcsCode: catalog.hcpcsCode,
                 barcode: gtin ?? "",
                 category: catalog.category,
-                lotNumber: nil
+                lotNumber: parsed?.lotNumber
             )
 
         case .unmatchedGTIN(let gtin, let parsed):
@@ -337,14 +383,38 @@ struct ScanTabView: View {
     }
 
     private func handleLinkToExisting(result: ScanOutcome) {
-        guard case .unmatchedGTIN(let gtin, _) = result else { return }
+        guard case .unmatchedGTIN(let gtin, let parsed) = result else { return }
         cancelAutoAdvance()
         scanResult = nil
-        gtinToLink = gtin
+        // Store both the GTIN (for the catalog to link) and the
+        // parsed barcode (for prefill after linking). The single
+        // GS1 scan we already did has the lot number; we don't want
+        // the user to have to scan again just to populate AddItemView.
+        pendingLinkContext = PendingLinkContext(gtin: gtin, parsed: parsed)
     }
 
-    private func handleLinkComplete(gtin: String, item: HCPCSCatalogItem) {
-        gtinToLink = nil
+    private func handleLinkComplete(
+        gtin: String,
+        item: HCPCSCatalogItem,
+        context: PendingLinkContext
+    ) {
+        // Linking sheet auto-dismisses when we clear pendingLinkContext.
+        pendingLinkContext = nil
+
+        // Now seamlessly open AddItemView with everything from the
+        // original scan PLUS the just-linked catalog data. This is
+        // the key step that turns a multi-scan workflow into one:
+        // the user scanned once at the top, and now lands in
+        // AddItemView with name/HCPCS/category/barcode/lot all set
+        // — they only need to confirm quantity and save.
+        addItemPrefill = AddItemPrefill(
+            name: item.displayName,
+            hcpcsCode: item.hcpcsCode,
+            barcode: gtin,
+            category: item.category,
+            lotNumber: context.parsed?.lotNumber
+        )
+
         showToast("Linked \(gtin) → \(item.displayName)")
     }
 
@@ -356,12 +426,15 @@ struct ScanTabView: View {
         guard let user = authManager.currentUser,
               let itemID = item.id else { return }
 
+        let clinicID = authManager.effectiveClinicID
+
         Task {
             do {
                 try await inventoryManager.checkOut(
                     itemID: itemID,
                     amount: quantity,
-                    by: user
+                    by: user,
+                    clinicID: clinicID
                 )
                 scanResult = nil
                 showToast("Checked out \(quantity) · \(item.name)")
@@ -393,28 +466,6 @@ private struct AddItemPrefill: Identifiable {
     let barcode: String?
     let category: String?
     let lotNumber: String?
-}
-
-// ══════════════════════════════════════════════════════
-// MARK: - Identifiable String binding helper
-// ══════════════════════════════════════════════════════
-
-private struct IdentifiableString: Identifiable {
-    var value: String
-    var id: String { value }
-}
-
-private extension Binding where Value == String? {
-    var asIdentifiableString: Binding<IdentifiableString?> {
-        Binding<IdentifiableString?>(
-            get: {
-                self.wrappedValue.map(IdentifiableString.init(value:))
-            },
-            set: { newValue in
-                self.wrappedValue = newValue?.value
-            }
-        )
-    }
 }
 
 // ══════════════════════════════════════════════════════

@@ -55,7 +55,7 @@ struct ContentView: View {
         .appBackground()
         .alert("Seed Inventory?", isPresented: $showInventoryOnlyConfirm) {
             Button("Seed") {
-                if let clinicID = authManager.currentUser?.clinicID,
+                if let clinicID = authManager.effectiveClinicID,
                    !clinicID.isEmpty {
                     Task {
                         await seeder.seedInventoryOnly(clinicID: clinicID)
@@ -227,7 +227,7 @@ struct ContentView: View {
             .tint(AppColors.warning)
             .disabled(
                 seeder.isSeeding ||
-                authManager.currentUser?.clinicID.isEmpty != false
+                (authManager.effectiveClinicID?.isEmpty ?? true)
             )
             .padding(.horizontal, AppSpacing.xxxl)
         }

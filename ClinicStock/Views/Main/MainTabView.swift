@@ -40,7 +40,7 @@ struct MainTabView: View {
                 ScanTabView()
                     .tag(2)
 
-                HistoryPlaceholder()
+                HistoryView()
                     .tag(3)
 
                 SettingsView()
@@ -103,52 +103,6 @@ struct CustomTabBar: View {
             .frame(maxWidth: .infinity)
         }
         .buttonStyle(.plain)
-    }
-}
-
-// ══════════════════════════════════════════════════════
-// MARK: - Stub tabs (awaiting real implementations)
-// ══════════════════════════════════════════════════════
-
-struct HistoryPlaceholder: View {
-    @EnvironmentObject var inventoryManager: InventoryManager
-
-    var body: some View {
-        NavigationStack {
-            List(inventoryManager.recentLogs) { log in
-                HStack(spacing: AppSpacing.md) {
-                    Image(systemName: log.action.icon)
-                        .font(.system(size: 18))
-                        .foregroundColor(AppColors.accent)
-                        .frame(width: 32)
-
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(log.itemName)
-                            .font(AppFonts.bodySemibold)
-                        Text(log.details)
-                            .font(AppFonts.caption)
-                            .foregroundColor(AppColors.textSecondary)
-                            .lineLimit(2)
-                        Text(log.userName)
-                            .font(AppFonts.footnote)
-                            .foregroundColor(AppColors.textTertiary)
-                    }
-                }
-                .padding(.vertical, AppSpacing.xs)
-            }
-            .listStyle(.plain)
-            .navigationTitle("Recent Activity")
-            .navigationBarTitleDisplayMode(.inline)
-            .overlay {
-                if inventoryManager.recentLogs.isEmpty {
-                    EmptyStateView(
-                        icon: "clock",
-                        title: "No Recent Activity",
-                        message: "Checkouts and changes will appear here"
-                    )
-                }
-            }
-        }
     }
 }
 

@@ -32,7 +32,12 @@ struct RootView: View {
                 SplashView()
 
             } else if authManager.isAuthenticated {
-                MainTabView()
+                // Platform admin with no clinic picked yet → let them pick
+                if authManager.needsClinicSelection {
+                    ClinicPickerView()
+                } else {
+                    MainTabView()
+                }
 
             } else {
                 LoginView()
@@ -41,19 +46,29 @@ struct RootView: View {
         // ── Inventory listener lifecycle ──
         //
         // .task(id:) runs when the view first appears AND whenever the
-        // clinicID changes. This covers:
-        //   - Fresh launch with a cached session (clinicID appears)
+        // effective clinicID changes. This covers:
+        //   - Fresh launch with a cached session
         //   - Sign-in (clinicID goes from nil → "abc123")
-        //   - Clinic switch, if we ever add one (clinicID changes)
+        //   - Platform admin switching clinics (clinicID changes)
+        //   - Platform admin entering/leaving aggregate mode
         //
         // When the id changes, SwiftUI cancels the previous task, so
         // startListening is safely called exactly once per clinic.
         //
-        .task(id: authManager.currentUser?.clinicID) {
-            if let clinicID = authManager.currentUser?.clinicID,
-               !clinicID.isEmpty {
+        // Aggregate mode triggers a different load path: one-shot
+        // cross-clinic fetch instead of a real-time listener.
+        //
+        .task(id: routeKey) {
+            if authManager.isAggregateMode {
+                print("Loading aggregate inventory across all clinics")
+                await inventoryManager.loadAggregateInventory()
+            } else if let clinicID = authManager.effectiveClinicID,
+                      !clinicID.isEmpty {
                 print("Starting inventory listener for clinic: \(clinicID)")
                 inventoryManager.startListening(clinicID: clinicID)
+            } else {
+                print("No effective clinic — stopping inventory listener")
+                inventoryManager.stopListening()
             }
         }
         // ── Stop listening on sign-out ──
@@ -63,6 +78,17 @@ struct RootView: View {
                 inventoryManager.stopListening()
             }
         }
+    }
+
+    /// A composite key that captures the full "what context are we in"
+    /// state. Changes to this key trigger a re-evaluation of which
+    /// loading path to take. Without this we'd have to set up two
+    /// separate .task blocks, which can't both observe the same id.
+    private var routeKey: String {
+        if authManager.isAggregateMode {
+            return "aggregate"
+        }
+        return authManager.effectiveClinicID ?? "none"
     }
 }
 

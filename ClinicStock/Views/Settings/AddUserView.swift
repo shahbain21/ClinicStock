@@ -265,7 +265,8 @@ struct AddUserView: View {
     // ══════════════════════════════════════════════════════
 
     private func inviteUser() {
-        guard let currentUser = authManager.currentUser else { return }
+        guard let currentUser = authManager.currentUser,
+              let clinicID = authManager.effectiveClinicID else { return }
 
         isAdding = true
         userManager.errorMessage = nil
@@ -277,7 +278,7 @@ struct AddUserView: View {
                     lastName: lastName,
                     email: email,
                     role: selectedRole,
-                    clinicID: currentUser.clinicID,
+                    clinicID: clinicID,
                     by: currentUser
                 )
                 showSuccess = true

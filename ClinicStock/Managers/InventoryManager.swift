@@ -38,11 +38,26 @@ class InventoryManager: ObservableObject {
     // MARK: - CLINIC ID VALIDATION
     // ═══════════════════════════════════
 
-    private func validClinicID(from user: AppUser) throws -> String {
-        guard !user.clinicID.isEmpty else {
-            throw AppError.noClinicAssigned
+    /// Resolve the clinic ID to operate on. Callers can pass an
+    /// explicit override (e.g. the platform admin's effectiveClinicID
+    /// from AuthManager). If no override is given, we fall back to the
+    /// user's own clinicID — correct for single-clinic users.
+    ///
+    /// Throws .noClinicAssigned if neither is available. That can
+    /// happen for a platform admin who hasn't picked a clinic yet —
+    /// the UI should prevent writes from getting here in that state,
+    /// so the error is a safety net.
+    private func validClinicID(
+        from user: AppUser,
+        override: String? = nil
+    ) throws -> String {
+        if let override = override, !override.isEmpty {
+            return override
         }
-        return user.clinicID
+        if let userClinicID = user.clinicID, !userClinicID.isEmpty {
+            return userClinicID
+        }
+        throw AppError.noClinicAssigned
     }
 
     // ═══════════════════════════════════
@@ -92,15 +107,58 @@ class InventoryManager: ObservableObject {
     }
 
     // ═══════════════════════════════════
+    // MARK: - AGGREGATE INVENTORY (platform admin only)
+    //
+    // For "All Clinics" view. One-shot fetch (no listener) since
+    // listening to N clinics simultaneously isn't practical. Caller
+    // should provide pull-to-refresh.
+    //
+    // Populates the same `items` and `lowStockItems` published props
+    // so existing views can read them, but each item retains its
+    // original clinicID — caller can group by clinic for display.
+    // ═══════════════════════════════════
+
+    func loadAggregateInventory() async {
+        // Stop any single-clinic listener; aggregate mode shouldn't
+        // mix with a per-clinic stream.
+        stopListening()
+
+        await MainActor.run { self.isLoading = true }
+
+        do {
+            let allItems = try await dbService.getAllInventoryAcrossClinics()
+
+            await MainActor.run {
+                self.items = allItems
+                self.lowStockItems = allItems.filter { $0.isLowStock }
+                self.recentLogs = []  // not used in aggregate mode (HistoryView queries directly)
+                self.isLoading = false
+                self.listenerError = nil
+            }
+        } catch {
+            await MainActor.run {
+                self.listenerError = error
+                self.isLoading = false
+                print("Aggregate inventory load failed: \(error)")
+            }
+        }
+    }
+
+    // ═══════════════════════════════════
     // MARK: - CHECK OUT
     // ═══════════════════════════════════
 
-    func checkOut(itemID: String, amount: Int, by user: AppUser) async throws {
+    func checkOut(
+        itemID: String,
+        amount: Int,
+        by user: AppUser,
+        clinicID: String? = nil
+    ) async throws {
         guard PermissionManager.canCheckOut(role: user.role) else {
             throw AppError.insufficientPermissions
         }
 
-        let clinicID = try validClinicID(from: user)
+        let clinicID = try validClinicID(from: user, override: clinicID)
 
         guard let item = try await dbService.getItem(
             itemID: itemID,
@@ -131,6 +189,7 @@ class InventoryManager: ObservableObject {
             "userName": user.displayName,
             "clinicID": clinicID,
             "action": "quantityUpdate",
+            "updateType": "checkout",
             "details": "Checked out \(amount): \(item.quantity) → \(newQuantity)",
             "previousValue": "\(item.quantity)",
             "newValue": "\(newQuantity)",
@@ -163,7 +222,8 @@ class InventoryManager: ObservableObject {
         itemID: String,
         amount: Int,
         checkoutTime: Date,
-        by user: AppUser
+        by user: AppUser,
+        clinicID: String? = nil
     ) async throws {
         guard PermissionManager.canVoidRecentCheckout(
             role: user.role,
@@ -172,7 +232,7 @@ class InventoryManager: ObservableObject {
             throw AppError.voidWindowExpired
         }
 
-        let clinicID = try validClinicID(from: user)
+        let clinicID = try validClinicID(from: user, override: clinicID)
 
         guard let item = try await dbService.getItem(
             itemID: itemID,
@@ -200,6 +260,7 @@ class InventoryManager: ObservableObject {
             "userName": user.displayName,
             "clinicID": clinicID,
             "action": "quantityUpdate",
+            "updateType": "restock",
             "details": "Voided checkout (+\(amount)): \(item.quantity) → \(newQuantity)",
             "previousValue": "\(item.quantity)",
             "newValue": "\(newQuantity)",
@@ -211,12 +272,17 @@ class InventoryManager: ObservableObject {
     // MARK: - ADD STOCK
     // ═══════════════════════════════════
 
-    func addStock(itemID: String, amount: Int, by user: AppUser) async throws {
+    func addStock(
+        itemID: String,
+        amount: Int,
+        by user: AppUser,
+        clinicID: String? = nil
+    ) async throws {
         guard PermissionManager.canAddStock(role: user.role) else {
             throw AppError.insufficientPermissions
         }
 
-        let clinicID = try validClinicID(from: user)
+        let clinicID = try validClinicID(from: user, override: clinicID)
 
         guard let item = try await dbService.getItem(
             itemID: itemID,
@@ -245,6 +311,7 @@ class InventoryManager: ObservableObject {
             "userName": user.displayName,
             "clinicID": clinicID,
             "action": "quantityUpdate",
+            "updateType": "restock",
             "details": "Restocked +\(amount): \(item.quantity) → \(newQuantity)",
             "previousValue": "\(item.quantity)",
             "newValue": "\(newQuantity)",
@@ -256,12 +323,16 @@ class InventoryManager: ObservableObject {
     // MARK: - REMOVE ITEM
     // ═══════════════════════════════════
 
-    func removeItem(itemID: String, by user: AppUser) async throws {
+    func removeItem(
+        itemID: String,
+        by user: AppUser,
+        clinicID: String? = nil
+    ) async throws {
         guard PermissionManager.canRemoveStock(role: user.role) else {
             throw AppError.insufficientPermissions
         }
 
-        let clinicID = try validClinicID(from: user)
+        let clinicID = try validClinicID(from: user, override: clinicID)
 
         guard let item = try await dbService.getItem(
             itemID: itemID,
@@ -303,13 +374,14 @@ class InventoryManager: ObservableObject {
         manufacturer: String,
         notes: String,
         unitCost: Double = 0,
-        by user: AppUser
+        by user: AppUser,
+        clinicID: String? = nil
     ) async throws {
         guard PermissionManager.canAddStock(role: user.role) else {
             throw AppError.insufficientPermissions
         }
 
-        let clinicID = try validClinicID(from: user)
+        let clinicID = try validClinicID(from: user, override: clinicID)
 
         if !barcode.isEmpty {
             // Use the same candidate expansion as lookup so duplicate
@@ -360,6 +432,7 @@ class InventoryManager: ObservableObject {
             "userName": user.displayName,
             "clinicID": clinicID,
             "action": "added",
+            "updateType": "restock",
             "details": "Added \(name) | Qty: \(quantity) | HCPCS: \(hcpcsCode)",
             "previousValue": "",
             "newValue": "\(quantity)",
@@ -375,13 +448,14 @@ class InventoryManager: ObservableObject {
         itemID: String,
         updates: [String: Any],
         changeDescription: String,
-        by user: AppUser
+        by user: AppUser,
+        clinicID: String? = nil
     ) async throws {
         guard PermissionManager.canEditItemInfo(role: user.role) else {
             throw AppError.insufficientPermissions
         }
 
-        let clinicID = try validClinicID(from: user)
+        let clinicID = try validClinicID(from: user, override: clinicID)
 
         guard let item = try await dbService.getItem(
             itemID: itemID,

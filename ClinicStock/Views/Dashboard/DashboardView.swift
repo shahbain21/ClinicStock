@@ -27,6 +27,12 @@ struct DashboardView: View {
     @EnvironmentObject var authManager: AuthManager
     @EnvironmentObject var inventoryManager: InventoryManager
 
+    /// Cache of clinicID → clinic name. Populated on appear in
+    /// aggregate mode so the per-clinic breakdown can show real names
+    /// instead of "Loading…". Refreshed when inventory items change
+    /// (in case a new clinic appeared in the data).
+    @State private var clinicNamesCache: [String: String] = [:]
+
     var totalQuantity: Int {
         inventoryManager.items.reduce(0) { $0 + $1.quantity }
     }
@@ -99,7 +105,17 @@ struct DashboardView: View {
                     // Single-clinic for now. Multi-clinic is a future
                     // feature — requires AppUser supporting multiple clinic
                     // memberships and cross-clinic activity queries.
-                    if let clinic = authManager.currentClinic {
+                    // ── Clinic context card ──
+                    //
+                    // In single-clinic mode: shows the clinic the user
+                    // is currently viewing. In aggregate mode: replaced
+                    // by an "All Clinics" header + per-clinic breakdown
+                    // (read-only summary; switching is via Settings per
+                    // earlier design decision).
+                    if authManager.isAggregateMode {
+                        aggregateClinicsBreakdown
+                            .padding(.horizontal, AppSpacing.lg)
+                    } else if let clinic = authManager.currentClinic {
                         VStack(spacing: AppSpacing.md) {
                             AppSectionHeader(title: "Clinic Overview")
 
@@ -129,14 +145,125 @@ struct DashboardView: View {
                 .padding(.bottom, 100)
             }
             .appBackground()
-            .navigationTitle("Dashboard")
+            .navigationTitle(authManager.isAggregateMode ? "All Clinics" : "Dashboard")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     NotificationBell()
                 }
             }
+            .refreshable {
+                if authManager.isAggregateMode {
+                    await inventoryManager.loadAggregateInventory()
+                }
+                // Single-clinic mode auto-refreshes via the listener.
+            }
+            .task(id: aggregateClinicSignature) {
+                // Resolve clinicID → clinic name for the breakdown card.
+                // Only runs in aggregate mode (and when the set of
+                // clinics in the loaded data changes).
+                guard authManager.isAggregateMode else { return }
+                await loadClinicNames()
+            }
         }
+    }
+
+    /// Signature that changes when the set of clinic IDs in the
+    /// currently-loaded inventory changes. Used as task(id:) so we
+    /// only re-resolve clinic names when needed.
+    private var aggregateClinicSignature: String {
+        let ids = Set(inventoryManager.items.compactMap { $0.clinicID })
+        return ids.sorted().joined(separator: "|")
+    }
+
+    private func loadClinicNames() async {
+        let ids = Set(inventoryManager.items.compactMap { $0.clinicID })
+            .filter { !$0.isEmpty }
+            .subtracting(clinicNamesCache.keys)
+        guard !ids.isEmpty else { return }
+
+        for clinicID in ids {
+            if let clinic = try? await DatabaseService.shared.getClinic(clinicID: clinicID) {
+                await MainActor.run {
+                    self.clinicNamesCache[clinicID] = clinic.name
+                }
+            }
+        }
+    }
+
+    /// Aggregate-mode card listing each clinic with its current
+    /// inventory metrics. Per the design choice: read-only summary —
+    /// admin switches between clinics via Settings, not by tapping
+    /// a card here.
+    private var aggregateClinicsBreakdown: some View {
+        let perClinic = computePerClinicBreakdown()
+
+        return VStack(spacing: AppSpacing.md) {
+            AppSectionHeader(title: "By Location")
+
+            if perClinic.isEmpty {
+                AppCard {
+                    Text("No inventory loaded yet — pull to refresh.")
+                        .font(AppFonts.caption)
+                        .foregroundColor(AppColors.textSecondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            } else {
+                ForEach(perClinic, id: \.clinicID) { entry in
+                    AppCard {
+                        HStack(spacing: AppSpacing.md) {
+                            Image(systemName: "building.2")
+                                .font(.system(size: 20))
+                                .foregroundColor(AppColors.accent)
+                                .frame(width: 36, height: 36)
+                                .background(
+                                    Circle().fill(AppColors.accent.opacity(0.15))
+                                )
+
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(entry.clinicName)
+                                    .font(AppFonts.bodySemibold)
+                                    .foregroundColor(AppColors.textPrimary)
+                                Text("\(entry.itemCount) items · \(entry.totalStock) units")
+                                    .font(AppFonts.caption)
+                                    .foregroundColor(AppColors.textSecondary)
+                            }
+
+                            Spacer()
+
+                            if entry.lowStockCount > 0 {
+                                VStack(alignment: .trailing, spacing: 0) {
+                                    Text("\(entry.lowStockCount)")
+                                        .font(AppFonts.bodySemibold)
+                                        .foregroundColor(AppColors.warning)
+                                    Text("low")
+                                        .font(AppFonts.footnote)
+                                        .foregroundColor(AppColors.textTertiary)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Group the loaded inventory by clinicID and compute per-clinic
+    /// summary stats.
+    private func computePerClinicBreakdown() -> [PerClinicSummary] {
+        let groups = Dictionary(grouping: inventoryManager.items) { $0.clinicID ?? "" }
+        return groups
+            .filter { !$0.key.isEmpty }
+            .map { (clinicID, items) in
+                PerClinicSummary(
+                    clinicID: clinicID,
+                    clinicName: clinicNamesCache[clinicID] ?? "Loading…",
+                    itemCount: items.count,
+                    totalStock: items.map { $0.quantity }.reduce(0, +),
+                    lowStockCount: items.filter { $0.isLowStock }.count
+                )
+            }
+            .sorted { $0.clinicName < $1.clinicName }
     }
 
     private func formatNumber(_ n: Int) -> String {
@@ -240,6 +367,20 @@ extension Date {
         formatter.dateFormat = "MMM d"
         return formatter.string(from: self)
     }
+}
+
+// ══════════════════════════════════════════════════════
+// MARK: - Per-clinic summary (aggregate dashboard)
+// ══════════════════════════════════════════════════════
+
+struct PerClinicSummary: Identifiable {
+    let clinicID: String
+    let clinicName: String
+    let itemCount: Int
+    let totalStock: Int
+    let lowStockCount: Int
+
+    var id: String { clinicID }
 }
 
 // ══════════════════════════════════════════════════════
