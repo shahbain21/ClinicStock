@@ -31,6 +31,7 @@ struct InventoryListView: View {
 
     @EnvironmentObject var authManager: AuthManager
     @EnvironmentObject var inventoryManager: InventoryManager
+    @EnvironmentObject var tabRouter: TabRouter
 
     @State private var searchText = ""
     @State private var selectedFilter: StockFilter = .all
@@ -208,7 +209,28 @@ struct InventoryListView: View {
                     bottomBar
                 }
             }
+            // Apply incoming filter requests from cross-tab navigation
+            // (e.g., dashboard stat card taps). We check on appear so
+            // it works the first time the tab opens too, and on change
+            // so subsequent requests work even when this tab is already
+            // visible.
+            .onAppear {
+                applyPendingFilterIfAny()
+            }
+            .onChange(of: tabRouter.pendingInventoryFilter) { _, _ in
+                applyPendingFilterIfAny()
+            }
         }
+    }
+
+    private func applyPendingFilterIfAny() {
+        guard let request = tabRouter.pendingInventoryFilter,
+              let mapped = StockFilter(rawValue: request.rawValue) else { return }
+        selectedFilter = mapped
+        // Clear the request so it doesn't re-apply next time we
+        // appear (e.g., user taps Inventory tab manually after
+        // having drilled in from Dashboard).
+        tabRouter.consumeInventoryFilter()
     }
 
     // ══════════════════════════════════════════════════════
@@ -583,7 +605,7 @@ struct AggregatedInventoryRow: Identifiable {
         // Deterministic key for SwiftUI ForEach. Stable regardless of
         // item order because we sort the clinic IDs.
         let clinicSig = items
-            .compactMap { $0.clinicID }
+            .map { $0.clinicID }
             .sorted()
             .joined(separator: "|")
         return "\(displayName)|\(hcpcsCode)|\(lotNumber)|\(clinicSig)"
@@ -628,7 +650,7 @@ struct AggregatedInventoryRow: Identifiable {
     /// Sorted descending by quantity so the location with the most stock
     /// shows first.
     var perClinicBreakdown: [(clinicID: String, qty: Int)] {
-        let grouped = Dictionary(grouping: items) { $0.clinicID ?? "" }
+        let grouped = Dictionary(grouping: items) { $0.clinicID }
         return grouped
             .map { (clinicID, items) in
                 (clinicID: clinicID,
@@ -794,4 +816,5 @@ struct NotificationBell: View {
         .environmentObject(InventoryManager())
         .environmentObject(UserManager())
         .environmentObject(HCPCSSearchService())
+        .environmentObject(TabRouter())
 }

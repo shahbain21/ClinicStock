@@ -50,6 +50,7 @@ struct ClinicStockApp: App {
     @StateObject private var inventoryManager = InventoryManager()
     @StateObject private var userManager = UserManager()
     @StateObject private var searchService = HCPCSSearchService()
+    @StateObject private var tabRouter = TabRouter()
 
     var body: some Scene {
         WindowGroup {
@@ -58,6 +59,7 @@ struct ClinicStockApp: App {
                 .environmentObject(inventoryManager)
                 .environmentObject(userManager)
                 .environmentObject(searchService)
+                .environmentObject(tabRouter)
                 .onOpenURL { url in
                     GIDSignIn.sharedInstance.handle(url)
                 }

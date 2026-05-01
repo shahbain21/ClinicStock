@@ -26,12 +26,20 @@ struct DashboardView: View {
 
     @EnvironmentObject var authManager: AuthManager
     @EnvironmentObject var inventoryManager: InventoryManager
+    @EnvironmentObject var tabRouter: TabRouter
 
     /// Cache of clinicID → clinic name. Populated on appear in
     /// aggregate mode so the per-clinic breakdown can show real names
     /// instead of "Loading…". Refreshed when inventory items change
     /// (in case a new clinic appeared in the data).
     @State private var clinicNamesCache: [String: String] = [:]
+
+    /// Sheet presentation for tapped activity rows. We open ItemDetail
+    /// in a sheet rather than trying to push it onto the Inventory
+    /// tab's NavigationStack — too complex from outside that stack,
+    /// and a sheet is a more direct UX for "I tapped something on
+    /// Dashboard, show me the thing."
+    @State private var activitySheetItem: InventoryItem? = nil
 
     var totalQuantity: Int {
         inventoryManager.items.reduce(0) { $0 + $1.quantity }
@@ -50,33 +58,51 @@ struct DashboardView: View {
             ScrollView {
                 VStack(spacing: AppSpacing.xl) {
 
-                    // ── Stats Row (3 cards) ──
+                    // ── Stats Row (3 cards, all tappable) ──
+                    //
+                    // User testing: testers wanted these to be drill-in
+                    // shortcuts. Each card now navigates to the Inventory
+                    // tab with the corresponding filter pre-applied.
                     HStack(spacing: AppSpacing.md) {
-                        DashboardStatCard(
-                            title: "Total Items",
-                            value: formatNumber(totalQuantity),
-                            color: AppColors.primary
-                        )
-                        DashboardStatCard(
-                            title: "Low Stock",
-                            value: "\(lowStockCount)",
-                            color: AppColors.warning
-                        )
-                        DashboardStatCard(
-                            title: "Out of Stock",
-                            value: "\(outOfStockCount)",
-                            color: AppColors.danger
-                        )
+                        Button {
+                            tabRouter.openInventory(filter: .all)
+                        } label: {
+                            DashboardStatCard(
+                                title: "Total Items",
+                                value: formatNumber(totalQuantity),
+                                color: AppColors.primary
+                            )
+                        }
+                        .buttonStyle(.plain)
+
+                        Button {
+                            tabRouter.openInventory(filter: .low)
+                        } label: {
+                            DashboardStatCard(
+                                title: "Low Stock",
+                                value: "\(lowStockCount)",
+                                color: AppColors.warning
+                            )
+                        }
+                        .buttonStyle(.plain)
+
+                        Button {
+                            tabRouter.openInventory(filter: .out)
+                        } label: {
+                            DashboardStatCard(
+                                title: "Out of Stock",
+                                value: "\(outOfStockCount)",
+                                color: AppColors.danger
+                            )
+                        }
+                        .buttonStyle(.plain)
                     }
                     .padding(.horizontal, AppSpacing.lg)
 
                     // ── Low Stock Alert Banner ──
                     if lowStockCount > 0 {
                         LowStockBanner(count: lowStockCount) {
-                            // TODO: Cross-tab navigation. Needs a shared
-                            // NavigationCoordinator to switch the tab to
-                            // Inventory and pre-apply the `Low` filter.
-                            print("TODO: navigate to Inventory (Low filter)")
+                            tabRouter.openInventory(filter: .low)
                         }
                         .padding(.horizontal, AppSpacing.lg)
                     }
@@ -88,13 +114,16 @@ struct DashboardView: View {
                                 title: "Recent Activity",
                                 action: "View All"
                             ) {
-                                // TODO: Cross-tab navigation to History tab.
-                                print("TODO: navigate to History tab")
+                                tabRouter.openHistory()
                             }
 
                             VStack(spacing: AppSpacing.sm) {
                                 ForEach(inventoryManager.recentLogs.prefix(5)) { log in
                                     RecentActivityRow(log: log)
+                                        .contentShape(Rectangle())
+                                        .onTapGesture {
+                                            handleActivityTap(log: log)
+                                        }
                                 }
                             }
                         }
@@ -165,19 +194,42 @@ struct DashboardView: View {
                 guard authManager.isAggregateMode else { return }
                 await loadClinicNames()
             }
+            .sheet(item: $activitySheetItem) { item in
+                NavigationStack {
+                    ItemDetailView(item: item)
+                }
+            }
         }
+    }
+
+    /// Tapped activity row → present the corresponding item's detail.
+    /// We look up the item by ID from the currently-loaded inventory.
+    /// In single-clinic mode this is the listener's items; in aggregate
+    /// mode it's the cross-clinic snapshot.
+    ///
+    /// Logs may reference items that have since been deleted or that
+    /// belong to a clinic not in the current view (in single-clinic
+    /// mode after switching away from where the activity originated).
+    /// In those cases the lookup returns nil and we silently no-op —
+    /// the user can tap "View All" to find the activity in History.
+    private func handleActivityTap(log: HistoryLog) {
+        guard let item = inventoryManager.items.first(where: { $0.id == log.itemID }) else {
+            print("[Dashboard] tap on activity with no matching item: \(log.itemID)")
+            return
+        }
+        activitySheetItem = item
     }
 
     /// Signature that changes when the set of clinic IDs in the
     /// currently-loaded inventory changes. Used as task(id:) so we
     /// only re-resolve clinic names when needed.
     private var aggregateClinicSignature: String {
-        let ids = Set(inventoryManager.items.compactMap { $0.clinicID })
+        let ids = Set(inventoryManager.items.map { $0.clinicID })
         return ids.sorted().joined(separator: "|")
     }
 
     private func loadClinicNames() async {
-        let ids = Set(inventoryManager.items.compactMap { $0.clinicID })
+        let ids = Set(inventoryManager.items.map { $0.clinicID })
             .filter { !$0.isEmpty }
             .subtracting(clinicNamesCache.keys)
         guard !ids.isEmpty else { return }
@@ -251,7 +303,7 @@ struct DashboardView: View {
     /// Group the loaded inventory by clinicID and compute per-clinic
     /// summary stats.
     private func computePerClinicBreakdown() -> [PerClinicSummary] {
-        let groups = Dictionary(grouping: inventoryManager.items) { $0.clinicID ?? "" }
+        let groups = Dictionary(grouping: inventoryManager.items) { $0.clinicID }
         return groups
             .filter { !$0.key.isEmpty }
             .map { (clinicID, items) in
@@ -391,4 +443,5 @@ struct PerClinicSummary: Identifiable {
     DashboardView()
         .environmentObject(AuthManager.preview())
         .environmentObject(InventoryManager())
+        .environmentObject(TabRouter())
 }

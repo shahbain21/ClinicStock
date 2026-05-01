@@ -32,7 +32,7 @@ struct InventoryItem: Codable, Identifiable, Hashable{
     }
     
     var isLowStock: Bool {
-        return quantity <= lowStockThreshold
+        return quantity <= lowStockThreshold && quantity > 0
     }
     
     var isOutOfStock: Bool {

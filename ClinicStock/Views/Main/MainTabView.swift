@@ -23,13 +23,12 @@ struct MainTabView: View {
 
     @EnvironmentObject var authManager: AuthManager
     @EnvironmentObject var inventoryManager: InventoryManager
-
-    @State private var selectedTab = 0
+    @EnvironmentObject var tabRouter: TabRouter
 
     var body: some View {
         ZStack(alignment: .bottom) {
 
-            TabView(selection: $selectedTab) {
+            TabView(selection: tabSelectionBinding) {
 
                 DashboardView()
                     .tag(0)
@@ -47,9 +46,18 @@ struct MainTabView: View {
                     .tag(4)
             }
 
-            CustomTabBar(selectedTab: $selectedTab)
+            CustomTabBar(selectedTab: tabSelectionBinding)
         }
         .ignoresSafeArea(.keyboard)
+    }
+
+    /// Bridge between TabView's Int-tag selection and TabRouter's
+    /// strongly-typed enum. Keeps both views and router in sync.
+    private var tabSelectionBinding: Binding<Int> {
+        Binding(
+            get: { tabRouter.selectedTab.rawValue },
+            set: { tabRouter.selectedTab = TabRouter.Tab(rawValue: $0) ?? .dashboard }
+        )
     }
 }
 
@@ -116,4 +124,5 @@ struct CustomTabBar: View {
         .environmentObject(InventoryManager())
         .environmentObject(UserManager())
         .environmentObject(HCPCSSearchService())
+        .environmentObject(TabRouter())
 }
