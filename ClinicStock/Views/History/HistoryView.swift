@@ -30,6 +30,7 @@ import FirebaseFirestore
 struct HistoryView: View {
 
     @EnvironmentObject var authManager: AuthManager
+    @EnvironmentObject var inventoryManager: InventoryManager
 
     @State private var logs: [HistoryLog] = []
     @State private var lastCursor: DocumentSnapshot? = nil
@@ -43,6 +44,15 @@ struct HistoryView: View {
     @State private var selectedFilter: LogFilter = .all
 
     @State private var csvToShare: CSVShareItem? = nil
+
+    /// Confirmation state for void action via context menu. We use an
+    /// alert with the log's details so admin can sanity-check what
+    /// they're undoing — silently reversing a checkout would feel
+    /// risky for an audit-trail-affecting action.
+    @State private var logPendingVoid: HistoryLog? = nil
+
+    /// Brief result message (success or error) shown after a void.
+    @State private var voidResultMessage: String? = nil
 
     enum LogFilter: Hashable {
         case all
@@ -148,6 +158,34 @@ struct HistoryView: View {
             .refreshable {
                 await loadInitial()
             }
+            .alert(
+                "Void this checkout?",
+                isPresented: Binding(
+                    get: { logPendingVoid != nil },
+                    set: { if !$0 { logPendingVoid = nil } }
+                ),
+                presenting: logPendingVoid
+            ) { log in
+                Button("Void", role: .destructive) {
+                    Task { await performVoid(log: log) }
+                }
+                Button("Cancel", role: .cancel) {
+                    logPendingVoid = nil
+                }
+            } message: { log in
+                Text("Reverse the checkout of \(log.itemName) by \(log.userName)? Inventory will be restored to its previous quantity. The void itself will be logged.")
+            }
+            .alert(
+                "Result",
+                isPresented: Binding(
+                    get: { voidResultMessage != nil },
+                    set: { if !$0 { voidResultMessage = nil } }
+                )
+            ) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text(voidResultMessage ?? "")
+            }
         }
     }
 
@@ -240,7 +278,10 @@ struct HistoryView: View {
                     }
 
                     ForEach(visibleLogs) { log in
-                        HistoryLogCard(log: log)
+                        HistoryLogCard(
+                            log: log,
+                            onVoid: voidActionFor(log: log)
+                        )
                     }
 
                     if hasMore {
@@ -395,6 +436,100 @@ struct HistoryView: View {
 
     // ══════════════════════════════════════════════════════
     // MARK: - Loading
+
+    /// Returns a closure to perform a void on this log if the current
+    /// user has permission, or nil otherwise. The HistoryLogCard uses
+    /// the closure's nil-ness to decide whether to render the Void
+    /// menu item — so logs that the user can't void show no menu at all.
+    ///
+    /// Permission rules (matching PermissionManager):
+    ///   - Only checkouts are voidable. Restocks, edits, deletions,
+    ///     and user-management logs are not.
+    ///   - User can always void their OWN checkout within 5 min
+    ///     (canVoidRecentCheckout).
+    ///   - Editor+ can void ANY checkout regardless of age
+    ///     (canVoidAnyCheckout). This is broad — flagged in design
+    ///     review; tightened later if needed.
+    ///
+    /// Checkout detection is two-tiered: prefer the explicit
+    /// `updateType` field if present, but fall back to inferring
+    /// from the quantity direction (newValue < previousValue means
+    /// someone took stock out, i.e. a checkout). Without the fallback,
+    /// older logs written before `updateType` was added would never
+    /// be voidable — surprising behavior for admins viewing recent
+    /// activity.
+    private func voidActionFor(log: HistoryLog) -> (() -> Void)? {
+        guard let user = authManager.currentUser else { return nil }
+        guard log.action == .quantityUpdate else { return nil }
+        guard isCheckoutLog(log) else { return nil }
+
+        let canOverride = PermissionManager.canVoidAnyCheckout(role: user.role)
+        let isOwn = log.userID == user.id
+        let withinWindow = isOwn && PermissionManager.canVoidRecentCheckout(
+            role: user.role,
+            checkoutTime: log.timestamp
+        )
+
+        guard canOverride || withinWindow else { return nil }
+
+        return {
+            logPendingVoid = log
+        }
+    }
+
+    /// True when this log represents a stock-decreasing change
+    /// (a checkout). Used both for void eligibility and could power
+    /// future "show only checkouts" filters without needing the
+    /// explicit updateType field.
+    private func isCheckoutLog(_ log: HistoryLog) -> Bool {
+        if log.updateType == "checkout" { return true }
+        if log.updateType == "restock" { return false }
+        // updateType missing — fall back to numeric comparison.
+        if let prev = Int(log.previousValue),
+           let new = Int(log.newValue) {
+            return new < prev
+        }
+        return false
+    }
+
+    private func performVoid(log: HistoryLog) async {
+        guard let user = authManager.currentUser else { return }
+        logPendingVoid = nil
+
+        // Use the log's clinicID, which is stamped at creation. In
+        // aggregate mode the user might be voiding a log from a
+        // clinic they're not currently "in" — that's fine, the call
+        // is scoped explicitly to the log's clinic.
+        let clinicID = log.clinicID
+
+        // Reconstruct the checkout amount from previous/new values.
+        // Logs store these as strings.
+        let prev = Int(log.previousValue) ?? 0
+        let new = Int(log.newValue) ?? 0
+        let amount = prev - new
+
+        guard amount > 0 else {
+            voidResultMessage = "Couldn't void: invalid quantity in log."
+            return
+        }
+
+        do {
+            try await inventoryManager.voidCheckout(
+                itemID: log.itemID,
+                amount: amount,
+                checkoutTime: log.timestamp,
+                by: user,
+                clinicID: clinicID
+            )
+            // Refresh the list so the now-voided checkout's effect on
+            // the inventory is reflected in any subsequent UI reads,
+            // and so the new void log shows up.
+            voidResultMessage = "Checkout voided. \(amount) returned to \(log.itemName)."
+            await loadInitial()
+        } catch {
+            voidResultMessage = "Couldn't void: \(error.localizedDescription)"
+        }
+    }
     // ══════════════════════════════════════════════════════
 
     private func loadInitial() async {
@@ -527,7 +662,25 @@ struct HistoryView: View {
 struct HistoryLogCard: View {
     let log: HistoryLog
 
+    /// When non-nil, the row offers a "Void" action via context menu.
+    /// Caller decides eligibility (role, time window) and only passes
+    /// a closure when the action should appear.
+    var onVoid: (() -> Void)? = nil
+
     var body: some View {
+        cardContent
+            .contextMenu {
+                if let onVoid = onVoid {
+                    Button(role: .destructive) {
+                        onVoid()
+                    } label: {
+                        Label("Void", systemImage: "arrow.uturn.backward")
+                    }
+                }
+            }
+    }
+
+    private var cardContent: some View {
         HStack(alignment: .top, spacing: AppSpacing.md) {
             Image(systemName: log.action.icon)
                 .font(.system(size: 18))

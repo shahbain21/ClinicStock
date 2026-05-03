@@ -28,8 +28,21 @@ struct ScanTabView: View {
     @State private var toastMessage: String? = nil
     @State private var toastTask: Task<Void, Never>? = nil
 
-    // Auto-advance task for in-stock scans → Item Detail.
-    @State private var autoAdvanceTask: Task<Void, Never>? = nil
+    /// Tracks a recently-completed checkout that can still be undone
+    /// from the toast. When non-nil, the toast renders an "Undo"
+    /// button. Cleared when the toast dismisses or the user navigates
+    /// away. The 10-second window here is shorter than the 5-min
+    /// permission window — this is just the toast lifetime, not a
+    /// hard deadline. Users can still void via Item Detail / History
+    /// for the full 5 min.
+    @State private var pendingUndo: UndoableCheckout? = nil
+
+    struct UndoableCheckout: Equatable {
+        let itemID: String
+        let itemName: String
+        let quantity: Int
+        let timestamp: Date
+    }
 
     @State private var itemForCheckout: InventoryItem? = nil
     @State private var itemForDetail: InventoryItem? = nil
@@ -66,12 +79,10 @@ struct ScanTabView: View {
                         onAddToInventory: { handleAddToInventory(result: result) },
                         onLinkToExisting: { handleLinkToExisting(result: result) },
                         onTryAgain: {
-                            cancelAutoAdvance()
                             scanResult = nil
                             showScanner = true
                         },
                         onDismiss: {
-                            cancelAutoAdvance()
                             scanResult = nil
                         }
                     )
@@ -232,6 +243,26 @@ struct ScanTabView: View {
                 .font(AppFonts.captionSemibold)
                 .foregroundColor(AppColors.textPrimary)
             Spacer()
+
+            // Inline undo affordance — shown only when there's a
+            // checkout that can still be reversed. Tapping fires the
+            // void flow and dismisses the toast; the user gets a
+            // second toast confirming success/failure.
+            if pendingUndo != nil {
+                Button {
+                    performUndo()
+                } label: {
+                    Text("Undo")
+                        .font(AppFonts.captionSemibold)
+                        .foregroundColor(AppColors.accent)
+                        .padding(.horizontal, AppSpacing.sm)
+                        .padding(.vertical, 4)
+                        .background(
+                            Capsule().stroke(AppColors.accent, lineWidth: 1)
+                        )
+                }
+                .buttonStyle(.plain)
+            }
         }
         .padding(AppSpacing.md)
         .background(
@@ -267,8 +298,13 @@ struct ScanTabView: View {
                 #if DEBUG
                 print("[ScanTab] matched inventory item: \(item.name)")
                 #endif
-                scanResult = .itemInStock(item)
-                scheduleAutoAdvance(to: item)
+                // Skip the intermediate ScanResultView "found" screen
+                // entirely — it auto-advanced after 1.5s anyway and
+                // gave the user no useful interaction in that time.
+                // Just push to ItemDetail and show a brief toast so
+                // they have visual confirmation the scan worked.
+                itemForDetail = item
+                showToast("Found · \(item.name)")
                 return
             }
         } catch {
@@ -298,58 +334,24 @@ struct ScanTabView: View {
     }
 
     // ══════════════════════════════════════════════════════
-    // MARK: - Auto-advance for in-stock scans
-    //
-    // The result screen is redundant for in-stock matches since the
-    // Item Detail page has every action (check out, add stock, view
-    // history, edit) plus more context. We show the confirmation
-    // briefly for positive feedback, then push detail.
-    // ══════════════════════════════════════════════════════
-
-    private func scheduleAutoAdvance(to item: InventoryItem) {
-        autoAdvanceTask?.cancel()
-        autoAdvanceTask = Task {
-            try? await Task.sleep(nanoseconds: 1_500_000_000) // 1.5s
-            guard !Task.isCancelled else { return }
-
-            await MainActor.run {
-                // Only advance if the user hasn't interacted in the meantime.
-                // If they tapped "Scan Another", "View Details", or dismissed,
-                // scanResult will have already changed.
-                if case .itemInStock = scanResult {
-                    scanResult = nil
-                    itemForDetail = item
-                }
-            }
-        }
-    }
-
-    private func cancelAutoAdvance() {
-        autoAdvanceTask?.cancel()
-        autoAdvanceTask = nil
-    }
-
-    // ══════════════════════════════════════════════════════
     // MARK: - Result actions
     // ══════════════════════════════════════════════════════
 
     private func handleCheckOut(result: ScanOutcome) {
         guard case .itemInStock(let item) = result else { return }
-        // User tapped the button — cancel auto-advance so we don't fire
-        // the detail navigation mid-checkout.
-        cancelAutoAdvance()
+        // Dead code path: in-stock scans now skip the result screen
+        // and push directly to ItemDetail. Kept defensively in case
+        // something else triggers .itemInStock in the future.
         itemForCheckout = item
     }
 
     private func handleViewDetails(result: ScanOutcome) {
         guard case .itemInStock(let item) = result else { return }
-        cancelAutoAdvance()
         scanResult = nil
         itemForDetail = item
     }
 
     private func handleAddToInventory(result: ScanOutcome) {
-        cancelAutoAdvance()
         scanResult = nil
 
         switch result {
@@ -384,7 +386,6 @@ struct ScanTabView: View {
 
     private func handleLinkToExisting(result: ScanOutcome) {
         guard case .unmatchedGTIN(let gtin, let parsed) = result else { return }
-        cancelAutoAdvance()
         scanResult = nil
         // Store both the GTIN (for the catalog to link) and the
         // parsed barcode (for prefill after linking). The single
@@ -437,20 +438,69 @@ struct ScanTabView: View {
                     clinicID: clinicID
                 )
                 scanResult = nil
-                showToast("Checked out \(quantity) · \(item.name)")
+                pendingUndo = UndoableCheckout(
+                    itemID: itemID,
+                    itemName: item.name,
+                    quantity: quantity,
+                    timestamp: Date()
+                )
+                showToast(
+                    "Checked out \(quantity) · \(item.name)",
+                    duration: 10
+                )
             } catch {
                 showToast("Error: \(error.localizedDescription)")
             }
         }
     }
 
-    private func showToast(_ message: String) {
+    /// Show a toast for `duration` seconds (default 3). When the
+    /// toast dismisses, any pending undo state is also cleared so
+    /// the toast doesn't reappear with stale info on a later message.
+    private func showToast(_ message: String, duration: TimeInterval = 3) {
         toastTask?.cancel()
         toastMessage = message
         toastTask = Task {
-            try? await Task.sleep(nanoseconds: 3_000_000_000)
+            try? await Task.sleep(nanoseconds: UInt64(duration * 1_000_000_000))
             guard !Task.isCancelled else { return }
             toastMessage = nil
+            pendingUndo = nil
+        }
+    }
+
+    /// Reverse the most recent checkout. Called from the inline Undo
+    /// button in the toast. We use the recorded itemID/quantity rather
+    /// than scanning history because:
+    ///   - We KNOW exactly what was checked out (no ambiguity vs. a
+    ///     parallel checkout from another user)
+    ///   - We avoid an extra DB read just to find the log we just wrote
+    ///   - The 5-min permission window is checked against `timestamp`
+    ///     in the closure below
+    private func performUndo() {
+        guard let undo = pendingUndo,
+              let user = authManager.currentUser else { return }
+
+        let clinicID = authManager.effectiveClinicID
+
+        // Cancel the auto-dismiss timer so the toast doesn't fade
+        // mid-undo. We'll show a confirmation toast when the void
+        // completes either way.
+        toastTask?.cancel()
+        pendingUndo = nil
+
+        Task {
+            do {
+                try await inventoryManager.voidCheckout(
+                    itemID: undo.itemID,
+                    amount: undo.quantity,
+                    checkoutTime: undo.timestamp,
+                    by: user,
+                    clinicID: clinicID
+                )
+                showToast("Undone · \(undo.itemName)")
+            } catch {
+                showToast("Couldn't undo: \(error.localizedDescription)")
+            }
         }
     }
 }

@@ -69,17 +69,41 @@ struct ItemDetailView: View {
         PermissionManager.canRemoveStock(role: role)
     }
 
+    /// Banner appears if the user's MOST RECENT quantity action on
+    /// this item was a checkout (still within the void window). After
+    /// performing an undo, the most recent action becomes a void
+    /// (a quantity-INCREASE), and the banner correctly disappears.
+    ///
+    /// Without this "most recent must be a checkout" check, tapping
+    /// Undo would walk backwards through history voiding every prior
+    /// checkout one at a time — because after each void, the filter
+    /// would just find the next-older checkout in `recentLogs`.
     private var voidableRecentLog: HistoryLog? {
         guard let uid = authManager.currentUser?.id else { return nil }
         let cutoff = Date().addingTimeInterval(-Self.voidWindow)
 
-        return recentLogs.first { log in
+        // Find the user's most recent quantityUpdate (in either
+        // direction) for this item, within the void window. If that
+        // most-recent action wasn't a checkout, return nil so the
+        // banner stays hidden.
+        let mostRecent = recentLogs.first { log in
             log.itemID == currentItem.id &&
             log.userID == uid &&
             log.action == .quantityUpdate &&
-            log.timestamp >= cutoff &&
-            (Int(log.newValue) ?? 0) < (Int(log.previousValue) ?? 0)
+            log.timestamp >= cutoff
         }
+
+        guard let candidate = mostRecent else { return nil }
+
+        let prev = Int(candidate.previousValue) ?? 0
+        let new = Int(candidate.newValue) ?? 0
+        guard new < prev else {
+            // Most recent action was a void or restock — banner stays
+            // hidden until they do a new checkout.
+            return nil
+        }
+
+        return candidate
     }
 
     // Last restock log — for the "Last Restocked" card.
@@ -715,17 +739,32 @@ struct ItemDetailView: View {
 
     private func loadHistory() async {
         guard let itemID = currentItem.id,
-              let clinicID = authManager.effectiveClinicID else { return }
+              let clinicID = authManager.effectiveClinicID else {
+            print("[ItemDetail] loadHistory: missing itemID or clinicID")
+            return
+        }
 
         isLoadingLogs = true
         defer { isLoadingLogs = false }
 
         do {
-            recentLogs = try await DatabaseService.shared.getItemLogs(
+            let logs = try await DatabaseService.shared.getItemLogs(
                 itemID: itemID,
                 clinicID: clinicID,
                 limit: 10
             )
+            recentLogs = logs
+
+            print("[ItemDetail] loadHistory loaded \(logs.count) logs")
+            if let first = logs.first {
+                print("[ItemDetail] most recent log: action=\(first.action.rawValue), userID=\(first.userID), prev=\(first.previousValue), new=\(first.newValue)")
+                print("[ItemDetail] currentUser uid=\(authManager.currentUser?.id ?? "nil")")
+                if let v = voidableRecentLog {
+                    print("[ItemDetail] voidableRecentLog matches: \(v.id ?? "no id")")
+                } else {
+                    print("[ItemDetail] voidableRecentLog returned nil — no banner")
+                }
+            }
 
             // Try to resolve lastUpdatedBy for the fallback "Last Restocked"
             // display. Non-critical — silently ignore failures.
@@ -737,7 +776,8 @@ struct ItemDetailView: View {
                 }
             }
         } catch {
-            print("Failed to load history: \(error)")
+            print("[ItemDetail] Failed to load history: \(error)")
+            print("[ItemDetail] error details — code: \((error as NSError).code), domain: \((error as NSError).domain)")
         }
     }
 }
