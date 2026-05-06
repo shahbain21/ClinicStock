@@ -58,6 +58,20 @@ struct DashboardView: View {
             ScrollView {
                 VStack(spacing: AppSpacing.xl) {
 
+                    // ── Back to All Clinics pill ──
+                    //
+                    // Shown only when a platform admin has switched
+                    // INTO a single clinic. Switching clinics is a
+                    // global mode change, not page navigation, so we
+                    // can't use a regular back button — but the user
+                    // still wants a way to return to the aggregate
+                    // view. This pill makes that path discoverable
+                    // without requiring them to find it via Settings.
+                    if authManager.isPlatformAdmin && !authManager.isAggregateMode {
+                        backToAllClinicsPill
+                            .padding(.horizontal, AppSpacing.lg)
+                    }
+
                     // ── Stats Row (3 cards, all tappable) ──
                     //
                     // User testing: testers wanted these to be drill-in
@@ -98,14 +112,6 @@ struct DashboardView: View {
                         .buttonStyle(.plain)
                     }
                     .padding(.horizontal, AppSpacing.lg)
-
-                    // ── Low Stock Alert Banner ──
-                    if lowStockCount > 0 {
-                        LowStockBanner(count: lowStockCount) {
-                            tabRouter.openInventory(filter: .low)
-                        }
-                        .padding(.horizontal, AppSpacing.lg)
-                    }
 
                     // ── Recent Activity ──
                     if !inventoryManager.recentLogs.isEmpty {
@@ -176,11 +182,6 @@ struct DashboardView: View {
             .appBackground()
             .navigationTitle(authManager.isAggregateMode ? "All Clinics" : "Dashboard")
             .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    NotificationBell()
-                }
-            }
             .refreshable {
                 if authManager.isAggregateMode {
                     await inventoryManager.loadAggregateInventory()
@@ -243,10 +244,37 @@ struct DashboardView: View {
         }
     }
 
+    /// Pill shown at the top of the dashboard when a platform admin
+    /// is viewing a single clinic but came from aggregate mode. Tap
+    /// puts them back into aggregate mode. Hidden for non-platform
+    /// admins (regular users don't have aggregate access) and when
+    /// already in aggregate mode (would be a no-op).
+    private var backToAllClinicsPill: some View {
+        Button {
+            authManager.selectAggregateMode()
+        } label: {
+            HStack(spacing: AppSpacing.xs) {
+                Image(systemName: "chevron.left")
+                    .font(.system(size: 13, weight: .semibold))
+                Text("All Clinics")
+                    .font(AppFonts.captionSemibold)
+            }
+            .foregroundColor(AppColors.accent)
+            .padding(.horizontal, AppSpacing.md)
+            .padding(.vertical, AppSpacing.sm)
+            .background(
+                Capsule()
+                    .fill(AppColors.accent.opacity(0.12))
+            )
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .buttonStyle(.plain)
+    }
+
     /// Aggregate-mode card listing each clinic with its current
-    /// inventory metrics. Per the design choice: read-only summary —
-    /// admin switches between clinics via Settings, not by tapping
-    /// a card here.
+    /// inventory metrics. Tapping a row switches into that clinic
+    /// (single-clinic mode). The "Back to All Clinics" pill at the
+    /// top of the dashboard provides the inverse action.
     private var aggregateClinicsBreakdown: some View {
         let perClinic = computePerClinicBreakdown()
 
@@ -262,39 +290,55 @@ struct DashboardView: View {
                 }
             } else {
                 ForEach(perClinic, id: \.clinicID) { entry in
-                    AppCard {
-                        HStack(spacing: AppSpacing.md) {
-                            Image(systemName: "building.2")
-                                .font(.system(size: 20))
-                                .foregroundColor(AppColors.accent)
-                                .frame(width: 36, height: 36)
-                                .background(
-                                    Circle().fill(AppColors.accent.opacity(0.15))
-                                )
+                    Button {
+                        // Switch out of aggregate mode and into this
+                        // clinic. selectClinic is async because it
+                        // also fetches the Clinic doc to populate
+                        // currentClinic — wrap in Task so the row
+                        // tap doesn't have to be in an async context.
+                        Task {
+                            await authManager.selectClinic(entry.clinicID)
+                        }
+                    } label: {
+                        AppCard {
+                            HStack(spacing: AppSpacing.md) {
+                                Image(systemName: "building.2")
+                                    .font(.system(size: 20))
+                                    .foregroundColor(AppColors.accent)
+                                    .frame(width: 36, height: 36)
+                                    .background(
+                                        Circle().fill(AppColors.accent.opacity(0.15))
+                                    )
 
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(entry.clinicName)
-                                    .font(AppFonts.bodySemibold)
-                                    .foregroundColor(AppColors.textPrimary)
-                                Text("\(entry.itemCount) items · \(entry.totalStock) units")
-                                    .font(AppFonts.caption)
-                                    .foregroundColor(AppColors.textSecondary)
-                            }
-
-                            Spacer()
-
-                            if entry.lowStockCount > 0 {
-                                VStack(alignment: .trailing, spacing: 0) {
-                                    Text("\(entry.lowStockCount)")
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(entry.clinicName)
                                         .font(AppFonts.bodySemibold)
-                                        .foregroundColor(AppColors.warning)
-                                    Text("low")
-                                        .font(AppFonts.footnote)
-                                        .foregroundColor(AppColors.textTertiary)
+                                        .foregroundColor(AppColors.textPrimary)
+                                    Text("\(entry.itemCount) items · \(entry.totalStock) units")
+                                        .font(AppFonts.caption)
+                                        .foregroundColor(AppColors.textSecondary)
                                 }
+
+                                Spacer()
+
+                                if entry.lowStockCount > 0 {
+                                    VStack(alignment: .trailing, spacing: 0) {
+                                        Text("\(entry.lowStockCount)")
+                                            .font(AppFonts.bodySemibold)
+                                            .foregroundColor(AppColors.warning)
+                                        Text("low")
+                                            .font(AppFonts.footnote)
+                                            .foregroundColor(AppColors.textTertiary)
+                                    }
+                                }
+
+                                Image(systemName: "chevron.right")
+                                    .font(.system(size: 13, weight: .semibold))
+                                    .foregroundColor(AppColors.textTertiary)
                             }
                         }
                     }
+                    .buttonStyle(.plain)
                 }
             }
         }

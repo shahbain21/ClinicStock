@@ -7,21 +7,14 @@
 //  Audit log entry. Immutable once written — Firestore rules forbid
 //  updates and deletes on this collection.
 //
-//  Field notes:
-//  - `updateType` is a denormalization that splits the broad
-//    `quantityUpdate` action into "checkout" vs "restock" without
-//    requiring a new ActionType case. Lets the History view filter
-//    the two separately and lets the void-eligibility logic identify
-//    which logs are voidable (checkouts only — you don't "void" a
-//    restock, you'd just check stock back out).
-//  - `updateType` is optional because older logs predating this field
-//    won't have it. New writes set it on every quantityUpdate.
 //
 
 import Foundation
 import FirebaseFirestore
 
 struct HistoryLog: Codable, Identifiable{
+    
+    // Stored at historyLogs/{logID}
     @DocumentID var id: String?
     var itemID: String
     var itemName: String
@@ -35,10 +28,7 @@ struct HistoryLog: Codable, Identifiable{
     var newValue: String
     var timestamp: Date
 
-    /// Sub-classification for `quantityUpdate` actions. Values:
-    ///   "checkout" — quantity decreased by user action
-    ///   "restock" — quantity increased (added stock or new item)
-    /// Nil for non-quantityUpdate actions or older logs.
+    // 
     var updateType: String? = nil
 
     enum ActionType: String, Codable, CaseIterable {

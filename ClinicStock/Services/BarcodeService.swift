@@ -4,28 +4,13 @@
 //
 //  Created by Mohamed Kaid
 //
-//  FIXES:
-//  - Trim whitespace/newlines from input (keyboard-wedge scanners often append)
-//  - Guard against empty input (was silently producing all-zero GTIN)
-//  - Replace Unicode-permissive isNumber with ASCII-only digit check
-//  - Validate GTIN check digit (Mod-10); reject invalid numerics
-//  - Rename .ean13 → .numeric with length stored separately (honest labels)
-//  - Precompile regex patterns as static constants (not per-call)
-//  - Basic FNC1 (GS) detection on raw GS1-128 scans — not full spec support,
-//    but handles the most common case where a scanner emits raw AIs
-//    separated by the Group Separator character (0x1D).
-//
-//  NOT FIXED (deferred to scanner SDK integration):
-//  - Full GS1 Application Identifier table with fixed-length AIs
-//  - Non-parenthesized, non-FNC1 concatenated AIs (ambiguous without AI table)
-//
 
 import Foundation
 
 struct BarcodeService {
 
     // ══════════════════════════════════════════════════════
-    // MARK: - Compiled regexes (reused across calls)
+    // MARK: - Reused Regexes
     // ══════════════════════════════════════════════════════
 
     private static let hcpcsPattern =

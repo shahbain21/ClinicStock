@@ -970,7 +970,6 @@ struct HistoryLogRow: View {
             size: "Universal",
             barcode: "012345678905",
             quantity: 71,
-            originalQuantity: 80,
             lowStockThreshold: 2,
             clinicID: "preview-clinic",
             category: "Electrical Stimulation",

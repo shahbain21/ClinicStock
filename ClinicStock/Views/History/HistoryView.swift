@@ -137,11 +137,6 @@ struct HistoryView: View {
             .appBackground()
             .navigationTitle("History")
             .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    NotificationBell()
-                }
-            }
             .safeAreaInset(edge: .bottom) {
                 if canExport && !logs.isEmpty {
                     exportBar
@@ -668,16 +663,24 @@ struct HistoryLogCard: View {
     var onVoid: (() -> Void)? = nil
 
     var body: some View {
-        cardContent
-            .contextMenu {
-                if let onVoid = onVoid {
+        // Only attach the context menu when there's actually an action
+        // available. SwiftUI's contextMenu modifier with no children
+        // still consumes the long-press gesture and briefly darkens
+        // the row, which feels broken from the user's side. Branch
+        // on onVoid up front so non-actionable rows don't even react
+        // to long-press.
+        if let onVoid = onVoid {
+            cardContent
+                .contextMenu {
                     Button(role: .destructive) {
                         onVoid()
                     } label: {
                         Label("Void", systemImage: "arrow.uturn.backward")
                     }
                 }
-            }
+        } else {
+            cardContent
+        }
     }
 
     private var cardContent: some View {

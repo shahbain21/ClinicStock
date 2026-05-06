@@ -139,21 +139,11 @@ struct SettingsView: View {
             sectionLabel("ADMIN TOOLS")
 
             VStack(spacing: AppSpacing.md) {
-                // Platform admin (multi-clinic owner) gets a "Switch
-                // Clinic" row showing the currently-active clinic. Tap
-                // to clear the selection and return to ClinicPickerView.
+                // Platform admin gets clinic-management rows. Switch
+                // Clinic moved to the Dashboard (tap clinic in All
+                // Clinics breakdown, or use the back-pill to return
+                // to aggregate). Settings keeps Create + Manage.
                 if authManager.isPlatformAdmin {
-                    Button {
-                        authManager.clearClinicSelection()
-                    } label: {
-                        settingsRow(
-                            icon: "arrow.triangle.2.circlepath",
-                            title: "Switch Clinic",
-                            detail: switchClinicDetailLabel
-                        )
-                    }
-                    .buttonStyle(.plain)
-
                     NavigationLink {
                         CreateClinicView()
                     } label: {
@@ -311,18 +301,6 @@ struct SettingsView: View {
     // ══════════════════════════════════════════════════════
     // MARK: - Row helpers
     // ══════════════════════════════════════════════════════
-
-    /// Trailing detail label for the platform admin's "Switch Clinic"
-    /// row. Reflects current session state:
-    ///  - aggregate mode → "All Clinics"
-    ///  - specific clinic selected → the clinic's name
-    ///  - neither (shouldn't happen since RootView routes elsewhere) → nil
-    private var switchClinicDetailLabel: String? {
-        if authManager.isAggregateMode {
-            return "All Clinics"
-        }
-        return authManager.currentClinic?.name
-    }
 
     private func sectionLabel(_ text: String) -> some View {
         Text(text)

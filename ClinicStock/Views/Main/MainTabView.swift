@@ -78,7 +78,10 @@ struct CustomTabBar: View {
 
             HStack {
                 tabButton(icon: "chart.bar.fill", title: "Dashboard", tab: 0)
-                tabButton(icon: "shippingbox.fill", title: "Inventory", tab: 1)
+                // Inventory tab removed — InventoryListView is now
+                // reached via Dashboard stat-card taps only. Keeps the
+                // tag (1) so TabRouter.openInventory still works to
+                // switch internal state.
                 tabButton(icon: "barcode.viewfinder", title: "Scan", tab: 2)
                 tabButton(icon: "clock.fill", title: "History", tab: 3)
                 tabButton(icon: "gearshape.fill", title: "Settings", tab: 4)

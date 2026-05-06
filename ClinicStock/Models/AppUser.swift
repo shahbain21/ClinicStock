@@ -4,18 +4,14 @@
 //
 //  Created by Mohamed Shahbain on 3/30/26.
 //
-//  CHANGED: clinicID is now optional.
-//    - nil   → platform admin with multi-clinic access (you, the owner)
-//    - set   → user belongs to one specific clinic (everyone else)
-//
-//  The role field still governs permissions within the clinic the user
-//  is currently viewing. A clinicID-less admin sees everything.
-//
+
 
 import Foundation
 import FirebaseFirestore
 
 struct AppUser: Codable, Identifiable {
+    
+    // Fields for user in user/{uid}
     @DocumentID var id: String?
     var email: String
     var displayName: String
@@ -26,20 +22,17 @@ struct AppUser: Codable, Identifiable {
     var lastLogin: Date?
     var dateCreated: Date
 
-    /// True when this user is a platform-level admin (owns multiple
-    /// clinics). UI and services use this to branch on special
-    /// admin-only flows like the clinic switcher.
+    // Multi-clinic admin
     var isPlatformAdmin: Bool {
         return role == .admin && clinicID == nil
     }
 
-    /// True when this user is admin of a single clinic — the pre-
-    /// multi-clinic admin model, still valid for clinics that signed
-    /// up independently.
+    // Admin for a single clinic
     var isClinicAdmin: Bool {
         return role == .admin && clinicID != nil
     }
 
+    // Different User Roles
     enum UserRole: String, Codable, CaseIterable {
         case admin
         case manager

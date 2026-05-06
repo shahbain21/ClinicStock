@@ -2,27 +2,7 @@
 //  HCPCSSearchService.swift
 //  ClinicStock
 //
-//  FIXES:
-//  - Deduplicated catalog load (was racing between init and first search)
-//  - Concurrent search() calls cancel the previous one (no stale results)
-//  - HCPCS codes consistently uppercased at ingestion (NLM results, saves)
-//  - NLM results return immediately; Firestore persistence happens async
-//    so the user sees results without waiting for N sequential writes
-//  - isSearching set for the entire search, not just the NLM phase
-//  - Category assignment from NLM defaults to "General Medical" instead of
-//    a wild guess from the code's letter — staff categorize during add
-//  - sourceYear uses the actual current year, not a hardcoded 2026
-//  - GTIN from a parenthesized GS1 scan now auto-associated with the HCPCS
-//    code when both are present in the same barcode
-//  - lookupBarcode cache mutation extracted to cacheItem() helper
-//  - commonName matching normalizes defensively (not trusting data invariants)
-//  - isLoaded resets to false on load failure so subsequent calls retry
-//  - Dropped unused Combine import
-//  - refreshCatalog() added so admin tools can force a reload without
-//    restarting the app
-//  - catalogSize computed property added so views don't hardcode counts
-//  - clearResults() added so views don't mutate @Published state directly
-//
+
 
 import Foundation
 import FirebaseFirestore

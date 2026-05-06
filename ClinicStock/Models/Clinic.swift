@@ -17,6 +17,7 @@ struct Clinic: Codable , Identifiable{
     var zip: String
     var phone: String
     var email: String
+    // UID of creator of clinic
     var managerID: String
     var isActive: Bool
     var dateCreated: Date

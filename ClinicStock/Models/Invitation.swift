@@ -19,7 +19,9 @@
 import Foundation
 import FirebaseFirestore
 
-struct Invitation: Codable, Identifiable {
+ struct Invitation: Codable, Identifiable {
+    
+    // Stored at invitations/{email}
     @DocumentID var id: String?
     var email: String
     var displayName: String

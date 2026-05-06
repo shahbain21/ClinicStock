@@ -462,7 +462,6 @@ struct ScanResultView: View {
             size: "Universal",
             barcode: "012345678905",
             quantity: 51,
-            originalQuantity: 60,
             lowStockThreshold: 10,
             clinicID: "preview-clinic",
             category: "Lumbar",

@@ -17,7 +17,7 @@ import FirebaseFirestore
 
 class DatabaseService {
 
-    // Singleton — one instance shared across the app
+    // Initialize Database
     static let shared = DatabaseService()
 
     private let db = Firestore.firestore()
@@ -31,7 +31,8 @@ class DatabaseService {
     // Path: inventory/{clinicID}/items/{itemID}
     // ══════════════════════════════════════════════════════
 
-    // Convenience — returns the items subcollection for a clinic
+    // ── Returns the items subcollection for a clinic ──
+    // This is the function that creates the path mentioned above
     private func itemsCollection(clinicID: String) -> CollectionReference {
         return db.collection("inventory")
             .document(clinicID)
@@ -67,6 +68,33 @@ class DatabaseService {
             }
     }
 
+    // ── Add a new item ──
+    func addItem(_ item: [String: Any], clinicID: String) async throws -> String {
+        let docRef = try await itemsCollection(clinicID: clinicID)
+            .addDocument(data: item)
+        print("Added item: \(docRef.documentID) to clinic \(clinicID)")
+        return docRef.documentID
+    }
+
+    // ── Update an item ──
+    func updateItem(itemID: String, clinicID: String, data: [String: Any]) async throws {
+        var updateData = data
+        updateData["lastUpdated"] = Timestamp(date: Date())
+
+        try await itemsCollection(clinicID: clinicID)
+            .document(itemID)
+            .updateData(updateData)
+        print("Updated item: \(itemID)")
+    }
+
+    // ── Delete an item ──
+    func deleteItem(itemID: String, clinicID: String) async throws {
+        try await itemsCollection(clinicID: clinicID)
+            .document(itemID)
+            .delete()
+        print("Deleted item: \(itemID)")
+    }
+    
     // ── Get a single item ──
     func getItem(itemID: String, clinicID: String) async throws -> InventoryItem? {
         let doc = try await itemsCollection(clinicID: clinicID)
@@ -75,16 +103,19 @@ class DatabaseService {
         return try? doc.data(as: InventoryItem.self)
     }
 
+    // ── Get low stock items for a clinic ──
+    func getLowStockItems(clinicID: String) async throws -> [InventoryItem] {
+        let snapshot = try await itemsCollection(clinicID: clinicID)
+            .getDocuments()
+
+        return snapshot.documents.compactMap {
+            try? $0.data(as: InventoryItem.self)
+        }.filter { $0.isLowStock }
+    }
+    
     // ── Find item by barcode (tries multiple format variants) ──
     //
-    // The caller passes a list of candidate strings — typically the raw
-    // scanned value plus a couple of normalized forms (14-digit GTIN,
-    // 13-digit stripped). Firestore's `in` operator matches any of them
-    // in a single query, which handles older items that were stored
-    // under a different format than what the scanner returns today.
-    //
-    // The legacy single-barcode call site is preserved as a convenience
-    // wrapper that forwards to this array version.
+    // Passes in array with multiple format variants for barcodes, finds item with any of the variants
     func findByBarcode(candidates: [String], clinicID: String) async throws -> InventoryItem? {
         let uniqueCandidates = Array(Set(candidates.filter { !$0.isEmpty })).prefix(10)
         guard !uniqueCandidates.isEmpty else { return nil }
@@ -119,56 +150,11 @@ class DatabaseService {
         return try await barcodeExists(candidates: [barcode], clinicID: clinicID)
     }
 
-    // ── Add a new item ──
-    func addItem(_ item: [String: Any], clinicID: String) async throws -> String {
-        let docRef = try await itemsCollection(clinicID: clinicID)
-            .addDocument(data: item)
-        print("Added item: \(docRef.documentID) to clinic \(clinicID)")
-        return docRef.documentID
-    }
-
-    // ── Update an item ──
-    func updateItem(itemID: String, clinicID: String, data: [String: Any]) async throws {
-        var updateData = data
-        updateData["lastUpdated"] = Timestamp(date: Date())
-
-        try await itemsCollection(clinicID: clinicID)
-            .document(itemID)
-            .updateData(updateData)
-        print("Updated item: \(itemID)")
-    }
-
-    // ── Delete an item ──
-    func deleteItem(itemID: String, clinicID: String) async throws {
-        try await itemsCollection(clinicID: clinicID)
-            .document(itemID)
-            .delete()
-        print("Deleted item: \(itemID)")
-    }
-
-    // ── Get low stock items for a clinic ──
-    func getLowStockItems(clinicID: String) async throws -> [InventoryItem] {
-        let snapshot = try await itemsCollection(clinicID: clinicID)
-            .getDocuments()
-
-        return snapshot.documents.compactMap {
-            try? $0.data(as: InventoryItem.self)
-        }.filter { $0.isLowStock }
-    }
-
     // ══════════════════════════════════════════════════════
     // MARK: - AGGREGATE INVENTORY (cross-clinic)
-    //
-    // Used by platform admin's "All Clinics" view. Fetches inventory
-    // from every active clinic in parallel. Each item still carries
-    // its own clinicID (preserved from the source document), so the
-    // caller can group by clinic for display.
-    //
-    // Not a listener — listeners are per-collection in Firestore, and
-    // we'd need one per clinic to keep up. For aggregate view that
-    // overhead isn't worth it. Reload on pull-to-refresh instead.
     // ══════════════════════════════════════════════════════
 
+    // Fetches inventory from every active clinic in parallel.
     func getAllInventoryAcrossClinics() async throws -> [InventoryItem] {
         let clinics = try await getAllClinics()
 
@@ -333,11 +319,6 @@ class DatabaseService {
     // ══════════════════════════════════════════════════════
 
     // ── Write a new history log ──
-    //
-    // Accepts clinicID as a separate parameter so callers don't have to
-    // remember to bake it into the log dict. We inject it before write
-    // so every log document has a clinicID field (required by our
-    // listenToRecentLogs / getClinicLogs queries, which filter on it).
     func addLog(_ log: [String: Any], clinicID: String) async throws {
         var enrichedLog = log
         enrichedLog["clinicID"] = clinicID
@@ -364,16 +345,10 @@ class DatabaseService {
     //
     // Returns a page of logs plus the last document in the page, which
     // the caller passes back in on the next call to get the next page.
-    // The non-paginated overload below is kept for callers that just
-    // need the most recent N logs (e.g. Dashboard recent activity).
     struct LogsPage {
         let logs: [HistoryLog]
         let lastDocument: DocumentSnapshot?
-
         var hasMore: Bool {
-            // If we got as many docs as requested, there's probably more.
-            // Cheaper than a separate count query. Caller can stop paging
-            // when a Load More returns fewer than `pageSize`.
             return lastDocument != nil
         }
     }
@@ -389,16 +364,11 @@ class DatabaseService {
             .whereField("clinicID", isEqualTo: clinicID)
 
         // Optional filter by action types (for the filter pills).
-        // Firestore 'in' supports up to 10 values.
         if let actions = actions, !actions.isEmpty {
             query = query.whereField("action", in: Array(actions.prefix(10)))
         }
 
         // Optional finer-grained filter for the quantityUpdate split.
-        // Only logs written after we started denormalizing this field
-        // will match — older logs lack it, so they'll be invisible when
-        // the caller filters on updateType. Acceptable: Checkouts /
-        // Restocks pills are forward-looking.
         if let updateType = updateType {
             query = query.whereField("updateType", isEqualTo: updateType)
         }
@@ -594,8 +564,6 @@ class DatabaseService {
         print("Invitation saved: \(normalized)")
     }
 
-    // Convenience overload for callers that have email inside the dict.
-    // Prefer the explicit form above.
     func saveInvitation(_ data: [String: Any]) async throws {
         guard let email = data["email"] as? String else {
             print("saveInvitation called without email — dropped")
@@ -625,15 +593,6 @@ class DatabaseService {
     // ══════════════════════════════════════════════════════
 
     func getAllClinics() async throws -> [Clinic] {
-        // No filtering on the query side — fetches ALL clinics, then
-        // filters and sorts in memory. This avoids needing a Firestore
-        // composite index for (isActive==true + order by name), which
-        // is overkill for the small number of clinics any one platform
-        // admin will have.
-        //
-        // If clinic count grows past hundreds, switch back to a query-
-        // side filter and create the composite index. Until then this
-        // is faster end-to-end (one round trip, no index build).
         let snapshot = try await db.collection("clinics")
             .getDocuments()
 
@@ -643,10 +602,7 @@ class DatabaseService {
             .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
     }
 
-    /// Includes archived (isActive == false) clinics. Only platform
-    /// admin should call this — the Manage Clinics screen needs to
-    /// see archived clinics so admin can restore them. Regular flows
-    /// (picker, switching) use the filtered version above.
+
     func getAllClinicsIncludingArchived() async throws -> [Clinic] {
         let snapshot = try await db.collection("clinics")
             .getDocuments()
@@ -656,9 +612,7 @@ class DatabaseService {
             .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
     }
 
-    /// Returns clinics that have been archived (soft-deleted). Used by
-    /// the "Archived Clinics" admin screen to list candidates for
-    /// restoration.
+
     func getArchivedClinics() async throws -> [Clinic] {
         let snapshot = try await db.collection("clinics")
             .getDocuments()
@@ -694,12 +648,8 @@ class DatabaseService {
         return doc.data()?["list"] as? [String] ?? []
     }
 
-    /// Global default low-stock threshold. Used as the initial value
-    /// when adding a new inventory item — existing items keep their
-    /// own per-item threshold and aren't affected when this changes.
-    ///
-    /// Returns 10 if no value has been saved yet (sensible default
-    /// matching the old hardcoded value in AddItemView).
+    // Global default low-stock threshold.
+    // Returns 10 if no value has been saved yet
     func getLowStockDefault() async throws -> Int {
         let doc = try await db.collection("settings")
             .document("lowStockDefault")
@@ -714,18 +664,7 @@ class DatabaseService {
         print("Low stock default updated: \(value)")
     }
 
-    /// Bulk-update every inventory item across every active clinic to
-    /// the given threshold. Used when admin chooses "Apply to all items"
-    /// after changing the global default — the heavy-hammer version
-    /// that overwrites any per-item customization.
-    ///
-    /// Returns a tuple of (succeeded, failed) item counts so the UI
-    /// can report partial failures. Failures are usually permission
-    /// denials on a specific item, network blips, etc. — they don't
-    /// abort the whole operation, we just keep going.
-    ///
-    /// This uses Firestore batched writes (max 500 ops per batch) so
-    /// large clinics stay within transactional limits.
+    // Bulk-update every inventory item across every active clinic to the given threshold.
     func applyLowStockThresholdToAllItems(_ threshold: Int) async throws -> (succeeded: Int, failed: Int) {
         let clinics = try await getAllClinics()
         var succeeded = 0
@@ -765,8 +704,6 @@ class DatabaseService {
 
             } catch {
                 print("Couldn't read items for clinic \(clinicID): \(error)")
-                // We don't know how many would have been updated, so
-                // can't increment failed by a known count. Move on.
             }
         }
 

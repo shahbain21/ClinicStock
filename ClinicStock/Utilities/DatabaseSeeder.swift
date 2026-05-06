@@ -321,7 +321,6 @@ class DatabaseSeeder: ObservableObject {
             "size": size,
             "barcode": "",
             "quantity": qty,
-            "originalQuantity": qty,
             "lowStockThreshold": threshold,
             "clinicID": clinicID,
             "category": category,

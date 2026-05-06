@@ -28,6 +28,13 @@ class InventoryManager: ObservableObject {
     private var inventoryListener: ListenerRegistration?
     private var logsListener: ListenerRegistration?
 
+    /// Cached snapshot of the last successful aggregate-mode load.
+    /// When the platform admin bounces between aggregate and a single
+    /// clinic, we surface this cache instantly on re-entry to avoid
+    /// the ~1-2s blank/flicker while the fresh cross-clinic fetch
+    /// completes in the background. Cleared on sign-out.
+    private var aggregateCache: [InventoryItem]? = nil
+
     private var currentClinicID: String?
 
     deinit {
@@ -106,6 +113,18 @@ class InventoryManager: ObservableObject {
         isLoading = false
     }
 
+    /// Called on sign-out. Tears down listeners AND clears the
+    /// aggregate cache so the next user doesn't see the previous
+    /// user's data on first login.
+    func clearForSignOut() {
+        stopListening()
+        items = []
+        lowStockItems = []
+        recentLogs = []
+        aggregateCache = nil
+        listenerError = nil
+    }
+
     // ═══════════════════════════════════
     // MARK: - AGGREGATE INVENTORY (platform admin only)
     //
@@ -123,7 +142,22 @@ class InventoryManager: ObservableObject {
         // mix with a per-clinic stream.
         stopListening()
 
-        await MainActor.run { self.isLoading = true }
+        // If we have a cached aggregate snapshot from a recent visit,
+        // publish it immediately so the dashboard renders without
+        // waiting for the network. The fetch below will refresh it.
+        // This eliminates the visible lag when toggling between
+        // aggregate and single-clinic modes during a session.
+        if let cached = aggregateCache {
+            await MainActor.run {
+                self.items = cached
+                self.lowStockItems = cached.filter { $0.isLowStock }
+                self.recentLogs = []
+                // No spinner — we have something to show.
+                self.isLoading = false
+            }
+        } else {
+            await MainActor.run { self.isLoading = true }
+        }
 
         do {
             let allItems = try await dbService.getAllInventoryAcrossClinics()
@@ -131,9 +165,10 @@ class InventoryManager: ObservableObject {
             await MainActor.run {
                 self.items = allItems
                 self.lowStockItems = allItems.filter { $0.isLowStock }
-                self.recentLogs = []  // not used in aggregate mode (HistoryView queries directly)
+                self.recentLogs = []
                 self.isLoading = false
                 self.listenerError = nil
+                self.aggregateCache = allItems
             }
         } catch {
             await MainActor.run {
@@ -298,7 +333,6 @@ class InventoryManager: ObservableObject {
             clinicID: clinicID,
             data: [
                 "quantity": newQuantity,
-                "originalQuantity": item.originalQuantity + amount,
                 "lastUpdatedBy": user.id ?? ""
             ]
         )
@@ -412,7 +446,6 @@ class InventoryManager: ObservableObject {
             "size": size,
             "barcode": storedBarcode,
             "quantity": quantity,
-            "originalQuantity": quantity,
             "lowStockThreshold": lowStockThreshold,
             "clinicID": clinicID,
             "category": category,

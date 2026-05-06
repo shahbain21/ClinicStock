@@ -191,11 +191,6 @@ struct InventoryListView: View {
             .appBackground()
             .navigationTitle("Inventory")
             .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    NotificationBell()
-                }
-            }
             .navigationDestination(for: InventoryItem.self) { item in
                 ItemDetailView(item: item)
             }
@@ -779,29 +774,6 @@ struct FlexibleHStack<Content: View>: View {
             spacing: spacing
         ) {
             content()
-        }
-    }
-}
-
-// ══════════════════════════════════════════════════════
-// MARK: - Notification Bell
-// ══════════════════════════════════════════════════════
-
-struct NotificationBell: View {
-    @EnvironmentObject var inventoryManager: InventoryManager
-
-    var body: some View {
-        ZStack(alignment: .topTrailing) {
-            Image(systemName: "bell.fill")
-                .font(.system(size: 18))
-                .foregroundColor(AppColors.textPrimary)
-
-            if inventoryManager.lowStockItems.count > 0 {
-                Circle()
-                    .fill(AppColors.danger)
-                    .frame(width: 10, height: 10)
-                    .offset(x: 3, y: -3)
-            }
         }
     }
 }
