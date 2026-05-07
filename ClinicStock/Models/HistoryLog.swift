@@ -4,11 +4,17 @@
 //
 //  Created by Mohamed Shahbain on 3/30/26.
 //
+//  Audit log entry. Immutable once written — Firestore rules forbid
+//  updates and deletes on this collection.
+//
+//
 
 import Foundation
 import FirebaseFirestore
 
 struct HistoryLog: Codable, Identifiable{
+    
+    // Stored at historyLogs/{logID}
     @DocumentID var id: String?
     var itemID: String
     var itemName: String
@@ -21,7 +27,10 @@ struct HistoryLog: Codable, Identifiable{
     var previousValue: String
     var newValue: String
     var timestamp: Date
-    
+
+    // 
+    var updateType: String? = nil
+
     enum ActionType: String, Codable, CaseIterable {
         case added
         case deleted

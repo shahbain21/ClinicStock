@@ -8,7 +8,9 @@
 import Foundation
 import FirebaseFirestore
 
-struct InventoryItem: Codable, Identifiable{
+struct InventoryItem: Codable, Identifiable, Hashable{
+    
+    // Stored at path inventory/{clinicID}/items/{itemID} 
     @DocumentID var id: String?
     var name: String
     var hcpcsCode: String
@@ -16,7 +18,6 @@ struct InventoryItem: Codable, Identifiable{
     var size: String
     var barcode: String
     var quantity: Int
-    var originalQuantity: Int
     var lowStockThreshold: Int
     var clinicID: String
     var category: String
@@ -27,32 +28,15 @@ struct InventoryItem: Codable, Identifiable{
     var dateAdded: Date
     var notes: String
     
-    var quantityUsed: Int {
-        return originalQuantity - quantity
-    }
-    
     var isLowStock: Bool {
-        return quantity <= lowStockThreshold
+        return quantity <= lowStockThreshold && quantity > 0
     }
     
     var isOutOfStock: Bool {
         return quantity <= 0
     }
     
-    var percentRemaining: Double {
-        guard originalQuantity > 0 else { return 0 }
-        return (Double(quantity) / Double(originalQuantity)) * 100
-    }
-    
     var totalValue: Double {
         return Double(quantity) * (unitCost ?? 0)
     }
-}
-
-
-
-struct HCPCSCode: Codable, Identifiable, Hashable {
-    var id: String { code }
-    var code: String
-    var description: String
 }
