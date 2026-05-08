@@ -72,7 +72,7 @@ class CatalogSeeder: ObservableObject {
             do {
                 var normalized = entry
                 normalized["hcpcsCode"] = code
-                try await dbService.saveCatalogItem(normalized)
+                try await dbService.upsertCatalogItemFromSeeder(normalized)
                 successCount += 1
             } catch {
                 failCount += 1

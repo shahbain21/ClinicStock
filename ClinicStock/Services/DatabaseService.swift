@@ -313,7 +313,30 @@ class DatabaseService {
             .setData(item, merge: true)
         print("Catalog item saved: \(code)")
     }
+    
+    func upsertCatalogItemFromSeeder(_ item: [String: Any]) async throws {
+        guard let code = item["hcpcsCode"] as? String else { return }
+        let docRef = db.collection("hcpcsCatalog").document(code.uppercased())
 
+        // Write all scalar fields, merging with whatever is already there.
+        var scalars = item
+        scalars.removeValue(forKey: "commonNames")
+        scalars.removeValue(forKey: "gtins")
+        try await docRef.setData(scalars, merge: true)
+
+        // Union the array fields so manually-added values are never lost.
+        var arrayUpdates: [String: Any] = [:]
+        if let commonNames = item["commonNames"] as? [String], !commonNames.isEmpty {
+            arrayUpdates["commonNames"] = FieldValue.arrayUnion(commonNames)
+        }
+        if let gtins = item["gtins"] as? [String], !gtins.isEmpty {
+            arrayUpdates["gtins"] = FieldValue.arrayUnion(gtins)
+        }
+        if !arrayUpdates.isEmpty {
+            try await docRef.updateData(arrayUpdates)
+        }
+    }
+    
     // ══════════════════════════════════════════════════════
     // MARK: - HISTORY LOGS
     // ══════════════════════════════════════════════════════
