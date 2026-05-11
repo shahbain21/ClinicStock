@@ -337,9 +337,8 @@ class DatabaseService {
         }
     }
     
-    // ══════════════════════════════════════════════════════
+    // ----------------------------
     // MARK: - HISTORY LOGS
-    // ══════════════════════════════════════════════════════
 
     // ── Write a new history log ──
     func addLog(_ log: [String: Any], clinicID: String) async throws {

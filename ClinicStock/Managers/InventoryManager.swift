@@ -2,15 +2,6 @@
 //  InventoryManager.swift
 //  ClinicStock
 //
-//  Created by Mohamed Shahbain on 4/3/26.
-//
-//  FIXES:
-//  - Added validClinicID() helper for consistent validation
-//  - Fixed checkOut clinicID guard logic
-//  - All methods now validate clinicID before proceeding
-//  - Added .noClinicAssigned error case
-//  - Added unitCost parameter to addNewItem
-//
 
 import Foundation
 import Combine
@@ -27,81 +18,42 @@ class InventoryManager: ObservableObject {
     private let dbService = DatabaseService.shared
     private var inventoryListener: ListenerRegistration?
     private var logsListener: ListenerRegistration?
-
-    /// Cached snapshot of the last successful aggregate-mode load.
-    /// When the platform admin bounces between aggregate and a single
-    /// clinic, we surface this cache instantly on re-entry to avoid
-    /// the ~1-2s blank/flicker while the fresh cross-clinic fetch
-    /// completes in the background. Cleared on sign-out.
-    private var aggregateCache: [InventoryItem]? = nil
-
+    private var aggregateCache: [InventoryItem]?
     private var currentClinicID: String?
 
-    deinit {
-        stopListening()
-    }
+    deinit { stopListening() }
 
-    // ═══════════════════════════════════
-    // MARK: - CLINIC ID VALIDATION
-    // ═══════════════════════════════════
+    // MARK: - Clinic ID Validation
 
-    /// Resolve the clinic ID to operate on. Callers can pass an
-    /// explicit override (e.g. the platform admin's effectiveClinicID
-    /// from AuthManager). If no override is given, we fall back to the
-    /// user's own clinicID — correct for single-clinic users.
-    ///
-    /// Throws .noClinicAssigned if neither is available. That can
-    /// happen for a platform admin who hasn't picked a clinic yet —
-    /// the UI should prevent writes from getting here in that state,
-    /// so the error is a safety net.
-    private func validClinicID(
-        from user: AppUser,
-        override: String? = nil
-    ) throws -> String {
-        if let override = override, !override.isEmpty {
-            return override
-        }
-        if let userClinicID = user.clinicID, !userClinicID.isEmpty {
-            return userClinicID
-        }
+    //Returns the clinic ID to use for a write operation.
+    // Uses the override if provided, otherwise falls back to the user's own clinicID.
+    private func validClinicID(from user: AppUser, override: String? = nil) throws -> String {
+        if let override, !override.isEmpty { return override }
+        if let id = user.clinicID, !id.isEmpty { return id }
         throw AppError.noClinicAssigned
     }
 
-    // ═══════════════════════════════════
-    // MARK: - LISTENERS
-    // ═══════════════════════════════════
+    // MARK: - Listeners
 
     func startListening(clinicID: String) {
         stopListening()
         currentClinicID = clinicID
         isLoading = true
 
-        inventoryListener = dbService.listenToInventory(
-            clinicID: clinicID
-        ) { [weak self] items, error in
+        inventoryListener = dbService.listenToInventory(clinicID: clinicID) { [weak self] items, error in
             DispatchQueue.main.async {
                 self?.listenerError = error
-                if let error = error {
-                    print("Inventory listener error: \(error)")
-                }
                 self?.items = items
                 self?.lowStockItems = items.filter { $0.isLowStock }
                 self?.isLoading = false
             }
         }
 
-        logsListener = dbService.listenToRecentLogs(
-            clinicID: clinicID
-        ) { [weak self] logs, error in
+        logsListener = dbService.listenToRecentLogs(clinicID: clinicID) { [weak self] logs, error in
             DispatchQueue.main.async {
-                if let error = error {
-                    print("Logs listener error: \(error)")
-                }
                 self?.recentLogs = logs
             }
         }
-
-        print("Listening to clinic: \(clinicID)")
     }
 
     func stopListening() {
@@ -113,9 +65,6 @@ class InventoryManager: ObservableObject {
         isLoading = false
     }
 
-    /// Called on sign-out. Tears down listeners AND clears the
-    /// aggregate cache so the next user doesn't see the previous
-    /// user's data on first login.
     func clearForSignOut() {
         stopListening()
         items = []
@@ -125,34 +74,18 @@ class InventoryManager: ObservableObject {
         listenerError = nil
     }
 
-    // ═══════════════════════════════════
-    // MARK: - AGGREGATE INVENTORY (platform admin only)
-    //
-    // For "All Clinics" view. One-shot fetch (no listener) since
-    // listening to N clinics simultaneously isn't practical. Caller
-    // should provide pull-to-refresh.
-    //
-    // Populates the same `items` and `lowStockItems` published props
-    // so existing views can read them, but each item retains its
-    // original clinicID — caller can group by clinic for display.
-    // ═══════════════════════════════════
+    // MARK: - Aggregate Inventory
 
+    //Loads inventory across all clinics for platform admin.
+    // Shows cached data immediately if available, then refreshes in the background.
     func loadAggregateInventory() async {
-        // Stop any single-clinic listener; aggregate mode shouldn't
-        // mix with a per-clinic stream.
         stopListening()
 
-        // If we have a cached aggregate snapshot from a recent visit,
-        // publish it immediately so the dashboard renders without
-        // waiting for the network. The fetch below will refresh it.
-        // This eliminates the visible lag when toggling between
-        // aggregate and single-clinic modes during a session.
         if let cached = aggregateCache {
             await MainActor.run {
                 self.items = cached
                 self.lowStockItems = cached.filter { $0.isLowStock }
                 self.recentLogs = []
-                // No spinner — we have something to show.
                 self.isLoading = false
             }
         } else {
@@ -161,7 +94,6 @@ class InventoryManager: ObservableObject {
 
         do {
             let allItems = try await dbService.getAllInventoryAcrossClinics()
-
             await MainActor.run {
                 self.items = allItems
                 self.lowStockItems = allItems.filter { $0.isLowStock }
@@ -174,227 +106,166 @@ class InventoryManager: ObservableObject {
             await MainActor.run {
                 self.listenerError = error
                 self.isLoading = false
-                print("Aggregate inventory load failed: \(error)")
             }
         }
     }
 
-    // ═══════════════════════════════════
-    // MARK: - CHECK OUT
-    // ═══════════════════════════════════
+    // MARK: - Check Out
 
-    func checkOut(
-        itemID: String,
-        amount: Int,
-        by user: AppUser,
-        clinicID: String? = nil
-    ) async throws {
+    func checkOut(itemID: String, amount: Int, by user: AppUser, clinicID: String? = nil) async throws {
         guard PermissionManager.canCheckOut(role: user.role) else {
             throw AppError.insufficientPermissions
         }
 
         let clinicID = try validClinicID(from: user, override: clinicID)
 
-        guard let item = try await dbService.getItem(
-            itemID: itemID,
-            clinicID: clinicID
-        ) else {
+        guard let item = try await dbService.getItem(itemID: itemID, clinicID: clinicID) else {
             throw AppError.itemNotFound
         }
 
         let newQuantity = item.quantity - amount
-        guard newQuantity >= 0 else {
-            throw AppError.insufficientStock
-        }
+        guard newQuantity >= 0 else { throw AppError.insufficientStock }
 
-        try await dbService.updateItem(
-            itemID: itemID,
-            clinicID: clinicID,
-            data: [
-                "quantity": newQuantity,
-                "lastUpdatedBy": user.id ?? ""
-            ]
-        )
-
-        try await dbService.addLog([
-            "itemID": itemID,
-            "itemName": item.name,
-            "itemBarcode": item.barcode,
-            "userID": user.id ?? "",
-            "userName": user.displayName,
-            "clinicID": clinicID,
-            "action": "quantityUpdate",
-            "updateType": "checkout",
-            "details": "Checked out \(amount): \(item.quantity) → \(newQuantity)",
-            "previousValue": "\(item.quantity)",
-            "newValue": "\(newQuantity)",
-            "timestamp": Timestamp(date: Date())
+        try await dbService.updateItem(itemID: itemID, clinicID: clinicID, data: [
+            "quantity": newQuantity,
+            "lastUpdatedBy": user.id ?? ""
         ])
 
-        // Low stock alert
+        try await dbService.addLog([
+            "itemID":        itemID,
+            "itemName":      item.name,
+            "itemBarcode":   item.barcode,
+            "userID":        user.id ?? "",
+            "userName":      user.displayName,
+            "clinicID":      clinicID,
+            "action":        "quantityUpdate",
+            "updateType":    "checkout",
+            "details":       "Checked out \(amount): \(item.quantity) → \(newQuantity)",
+            "previousValue": "\(item.quantity)",
+            "newValue":      "\(newQuantity)",
+            "timestamp":     Timestamp(date: Date())
+        ])
+
         if newQuantity <= item.lowStockThreshold && item.quantity > item.lowStockThreshold {
             try await dbService.addLog([
-                "itemID": itemID,
-                "itemName": item.name,
-                "itemBarcode": item.barcode,
-                "userID": "system",
-                "userName": "System",
-                "clinicID": clinicID,
-                "action": "stockAlert",
-                "details": "\(item.name) is LOW STOCK (\(newQuantity) remaining)",
+                "itemID":        itemID,
+                "itemName":      item.name,
+                "itemBarcode":   item.barcode,
+                "userID":        "system",
+                "userName":      "System",
+                "clinicID":      clinicID,
+                "action":        "stockAlert",
+                "details":       "\(item.name) is LOW STOCK (\(newQuantity) remaining)",
                 "previousValue": "\(item.quantity)",
-                "newValue": "\(newQuantity)",
-                "timestamp": Timestamp(date: Date())
+                "newValue":      "\(newQuantity)",
+                "timestamp":     Timestamp(date: Date())
             ])
         }
     }
 
-    // ═══════════════════════════════════
-    // MARK: - VOID CHECKOUT
-    // ═══════════════════════════════════
+    // MARK: - Void Checkout
 
-    func voidCheckout(
-        itemID: String,
-        amount: Int,
-        checkoutTime: Date,
-        by user: AppUser,
-        clinicID: String? = nil
-    ) async throws {
-        guard PermissionManager.canVoidRecentCheckout(
-            role: user.role,
-            checkoutTime: checkoutTime
-        ) else {
+    func voidCheckout(itemID: String, amount: Int, checkoutTime: Date, by user: AppUser, clinicID: String? = nil) async throws {
+        guard PermissionManager.canVoidRecentCheckout(role: user.role, checkoutTime: checkoutTime) else {
             throw AppError.voidWindowExpired
         }
 
         let clinicID = try validClinicID(from: user, override: clinicID)
 
-        guard let item = try await dbService.getItem(
-            itemID: itemID,
-            clinicID: clinicID
-        ) else {
+        guard let item = try await dbService.getItem(itemID: itemID, clinicID: clinicID) else {
             throw AppError.itemNotFound
         }
 
         let newQuantity = item.quantity + amount
 
-        try await dbService.updateItem(
-            itemID: itemID,
-            clinicID: clinicID,
-            data: [
-                "quantity": newQuantity,
-                "lastUpdatedBy": user.id ?? ""
-            ]
-        )
+        try await dbService.updateItem(itemID: itemID, clinicID: clinicID, data: [
+            "quantity": newQuantity,
+            "lastUpdatedBy": user.id ?? ""
+        ])
 
         try await dbService.addLog([
-            "itemID": itemID,
-            "itemName": item.name,
-            "itemBarcode": item.barcode,
-            "userID": user.id ?? "",
-            "userName": user.displayName,
-            "clinicID": clinicID,
-            "action": "quantityUpdate",
-            "updateType": "restock",
-            "details": "Voided checkout (+\(amount)): \(item.quantity) → \(newQuantity)",
+            "itemID":        itemID,
+            "itemName":      item.name,
+            "itemBarcode":   item.barcode,
+            "userID":        user.id ?? "",
+            "userName":      user.displayName,
+            "clinicID":      clinicID,
+            "action":        "quantityUpdate",
+            "updateType":    "restock",
+            "details":       "Voided checkout (+\(amount)): \(item.quantity) → \(newQuantity)",
             "previousValue": "\(item.quantity)",
-            "newValue": "\(newQuantity)",
-            "timestamp": Timestamp(date: Date())
+            "newValue":      "\(newQuantity)",
+            "timestamp":     Timestamp(date: Date())
         ])
     }
 
-    // ═══════════════════════════════════
-    // MARK: - ADD STOCK
-    // ═══════════════════════════════════
+    // MARK: - Add Stock
 
-    func addStock(
-        itemID: String,
-        amount: Int,
-        by user: AppUser,
-        clinicID: String? = nil
-    ) async throws {
+    func addStock(itemID: String, amount: Int, by user: AppUser, clinicID: String? = nil) async throws {
         guard PermissionManager.canAddStock(role: user.role) else {
             throw AppError.insufficientPermissions
         }
 
         let clinicID = try validClinicID(from: user, override: clinicID)
 
-        guard let item = try await dbService.getItem(
-            itemID: itemID,
-            clinicID: clinicID
-        ) else {
+        guard let item = try await dbService.getItem(itemID: itemID, clinicID: clinicID) else {
             throw AppError.itemNotFound
         }
 
         let newQuantity = item.quantity + amount
 
-        try await dbService.updateItem(
-            itemID: itemID,
-            clinicID: clinicID,
-            data: [
-                "quantity": newQuantity,
-                "lastUpdatedBy": user.id ?? ""
-            ]
-        )
+        try await dbService.updateItem(itemID: itemID, clinicID: clinicID, data: [
+            "quantity": newQuantity,
+            "lastUpdatedBy": user.id ?? ""
+        ])
 
         try await dbService.addLog([
-            "itemID": itemID,
-            "itemName": item.name,
-            "itemBarcode": item.barcode,
-            "userID": user.id ?? "",
-            "userName": user.displayName,
-            "clinicID": clinicID,
-            "action": "quantityUpdate",
-            "updateType": "restock",
-            "details": "Restocked +\(amount): \(item.quantity) → \(newQuantity)",
+            "itemID":        itemID,
+            "itemName":      item.name,
+            "itemBarcode":   item.barcode,
+            "userID":        user.id ?? "",
+            "userName":      user.displayName,
+            "clinicID":      clinicID,
+            "action":        "quantityUpdate",
+            "updateType":    "restock",
+            "details":       "Restocked +\(amount): \(item.quantity) → \(newQuantity)",
             "previousValue": "\(item.quantity)",
-            "newValue": "\(newQuantity)",
-            "timestamp": Timestamp(date: Date())
+            "newValue":      "\(newQuantity)",
+            "timestamp":     Timestamp(date: Date())
         ])
     }
 
-    // ═══════════════════════════════════
-    // MARK: - REMOVE ITEM
-    // ═══════════════════════════════════
+    // MARK: - Remove Item
 
-    func removeItem(
-        itemID: String,
-        by user: AppUser,
-        clinicID: String? = nil
-    ) async throws {
+    func removeItem(itemID: String, by user: AppUser, clinicID: String? = nil) async throws {
         guard PermissionManager.canRemoveStock(role: user.role) else {
             throw AppError.insufficientPermissions
         }
 
         let clinicID = try validClinicID(from: user, override: clinicID)
 
-        guard let item = try await dbService.getItem(
-            itemID: itemID,
-            clinicID: clinicID
-        ) else {
+        guard let item = try await dbService.getItem(itemID: itemID, clinicID: clinicID) else {
             throw AppError.itemNotFound
         }
 
         try await dbService.deleteItem(itemID: itemID, clinicID: clinicID)
 
         try await dbService.addLog([
-            "itemID": itemID,
-            "itemName": item.name,
-            "itemBarcode": item.barcode,
-            "userID": user.id ?? "",
-            "userName": user.displayName,
-            "clinicID": clinicID,
-            "action": "deleted",
-            "details": "Removed \(item.name) (\(item.quantity) remaining)",
+            "itemID":        itemID,
+            "itemName":      item.name,
+            "itemBarcode":   item.barcode,
+            "userID":        user.id ?? "",
+            "userName":      user.displayName,
+            "clinicID":      clinicID,
+            "action":        "deleted",
+            "details":       "Removed \(item.name) (\(item.quantity) remaining)",
             "previousValue": "\(item.quantity)",
-            "newValue": "0",
-            "timestamp": Timestamp(date: Date())
+            "newValue":      "0",
+            "timestamp":     Timestamp(date: Date())
         ])
     }
 
-    // ═══════════════════════════════════
-    // MARK: - ADD NEW ITEM
-    // ═══════════════════════════════════
+    // MARK: - Add New Item
 
     func addNewItem(
         name: String,
@@ -418,10 +289,6 @@ class InventoryManager: ObservableObject {
         let clinicID = try validClinicID(from: user, override: clinicID)
 
         if !barcode.isEmpty {
-            // Use the same candidate expansion as lookup so duplicate
-            // detection and barcode matching stay in sync. Without this,
-            // scanning would say "not in stock" while adding would say
-            // "duplicate" — contradictory results from the same barcode.
             let exists = try await dbService.barcodeExists(
                 candidates: barcodeCandidates(for: barcode),
                 clinicID: clinicID
@@ -429,53 +296,46 @@ class InventoryManager: ObservableObject {
             if exists { throw AppError.duplicateBarcode }
         }
 
-        // Normalize the barcode to its canonical 14-digit GTIN form
-        // when possible, so future lookups (which also normalize) match
-        // consistently. Items from before this change stored whatever
-        // the user typed — that's why lookup uses candidate expansion.
         let storedBarcode: String = {
-            if barcode.isEmpty { return "" }
-            let parsed = BarcodeService.parse(barcode)
-            return parsed.gtin ?? barcode
+            guard !barcode.isEmpty else { return "" }
+            return BarcodeService.parse(barcode).gtin ?? barcode
         }()
 
         let itemID = try await dbService.addItem([
-            "name": name,
-            "hcpcsCode": hcpcsCode,
-            "lotNumber": lotNumber,
-            "size": size,
-            "barcode": storedBarcode,
-            "quantity": quantity,
+            "name":              name,
+            "hcpcsCode":         hcpcsCode,
+            "lotNumber":         lotNumber,
+            "size":              size,
+            "barcode":           storedBarcode,
+            "quantity":          quantity,
             "lowStockThreshold": lowStockThreshold,
-            "clinicID": clinicID,
-            "category": category,
-            "manufacturer": manufacturer,
-            "unitCost": unitCost,
-            "lastUpdatedBy": user.id ?? "",
-            "lastUpdated": Timestamp(date: Date()),
-            "dateAdded": Timestamp(date: Date()),
-            "notes": notes
+            "clinicID":          clinicID,
+            "category":          category,
+            "manufacturer":      manufacturer,
+            "unitCost":          unitCost,
+            "lastUpdatedBy":     user.id ?? "",
+            "lastUpdated":       Timestamp(date: Date()),
+            "dateAdded":         Timestamp(date: Date()),
+            "notes":             notes
         ], clinicID: clinicID)
 
         try await dbService.addLog([
-            "itemID": itemID,
-            "itemName": name,
-            "itemBarcode": storedBarcode,
-            "userID": user.id ?? "",
-            "userName": user.displayName,
-            "clinicID": clinicID,
-            "action": "added",
-            "updateType": "restock",
-            "details": "Added \(name) | Qty: \(quantity) | HCPCS: \(hcpcsCode)",
+            "itemID":        itemID,
+            "itemName":      name,
+            "itemBarcode":   storedBarcode,
+            "userID":        user.id ?? "",
+            "userName":      user.displayName,
+            "clinicID":      clinicID,
+            "action":        "added",
+            "updateType":    "restock",
+            "details":       "Added \(name) | Qty: \(quantity) | HCPCS: \(hcpcsCode)",
             "previousValue": "",
-            "newValue": "\(quantity)",
-            "timestamp": Timestamp(date: Date())
+            "newValue":      "\(quantity)",
+            "timestamp":     Timestamp(date: Date())
         ])
     }
 
-    // ═══════════════════════════════════
-    // MARK: - UPDATE ITEM INFO
-    // ═══════════════════════════════════
+    // MARK: - Update Item Info
 
     func updateItemInfo(
         itemID: String,
@@ -490,83 +350,57 @@ class InventoryManager: ObservableObject {
 
         let clinicID = try validClinicID(from: user, override: clinicID)
 
-        guard let item = try await dbService.getItem(
-            itemID: itemID,
-            clinicID: clinicID
-        ) else {
+        guard let item = try await dbService.getItem(itemID: itemID, clinicID: clinicID) else {
             throw AppError.itemNotFound
         }
 
         var updateData = updates
         updateData["lastUpdatedBy"] = user.id ?? ""
 
-        try await dbService.updateItem(
-            itemID: itemID,
-            clinicID: clinicID,
-            data: updateData
-        )
+        try await dbService.updateItem(itemID: itemID, clinicID: clinicID, data: updateData)
 
         try await dbService.addLog([
-            "itemID": itemID,
-            "itemName": item.name,
-            "itemBarcode": item.barcode,
-            "userID": user.id ?? "",
-            "userName": user.displayName,
-            "clinicID": clinicID,
-            "action": "infoUpdate",
-            "details": changeDescription,
+            "itemID":        itemID,
+            "itemName":      item.name,
+            "itemBarcode":   item.barcode,
+            "userID":        user.id ?? "",
+            "userName":      user.displayName,
+            "clinicID":      clinicID,
+            "action":        "infoUpdate",
+            "details":       changeDescription,
             "previousValue": "",
-            "newValue": "",
-            "timestamp": Timestamp(date: Date())
+            "newValue":      "",
+            "timestamp":     Timestamp(date: Date())
         ])
     }
 
-    // ═══════════════════════════════════
-    // MARK: - BARCODE LOOKUP
-    // ═══════════════════════════════════
+    // MARK: - Barcode Lookup
 
     func lookupBarcode(barcode: String, clinicID: String) async throws -> InventoryItem? {
-        return try await dbService.findByBarcode(
-            candidates: barcodeCandidates(for: barcode),
-            clinicID: clinicID
-        )
+        try await dbService.findByBarcode(candidates: barcodeCandidates(for: barcode), clinicID: clinicID)
     }
 
-    /// Build the list of barcode format variants to try when looking up
-    /// an item. Covers the common mismatches:
-    ///  - Scanner returns 13-digit EAN-13, item stored as 14-digit GTIN
-    ///  - Scanner returns 14-digit GTIN-14, item stored raw from typing
-    ///  - Scanner returns GS1-128 with AIs, item stored as just the GTIN
-    ///  - Raw scanned string (exact match path — preserve legacy behavior)
-    ///
-    /// Deduplication happens at the DatabaseService layer.
+    /// Generates all barcode format variants to try during lookup.
+    /// Handles mismatches between how a barcode was scanned vs how it was stored.
     private func barcodeCandidates(for raw: String) -> [String] {
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         var candidates = [trimmed]
 
-        let parsed = BarcodeService.parse(trimmed)
-        if let gtin = parsed.gtin {
-            // 14-digit normalized form
-            candidates.append(gtin)
+        guard let gtin = BarcodeService.parse(trimmed).gtin else { return candidates }
 
-            // 13-digit form (strip one leading zero if GTIN is 14 digits
-            // starting with 0 — i.e. the EAN-13 representation)
-            if gtin.count == 14 && gtin.first == "0" {
-                candidates.append(String(gtin.dropFirst()))
-            }
+        candidates.append(gtin)
 
-            // 12-digit form (strip two leading zeros if present — UPC-A)
-            if gtin.count == 14 && gtin.hasPrefix("00") {
-                candidates.append(String(gtin.dropFirst(2)))
-            }
+        if gtin.count == 14 && gtin.first == "0" {
+            candidates.append(String(gtin.dropFirst()))
+        }
+        if gtin.count == 14 && gtin.hasPrefix("00") {
+            candidates.append(String(gtin.dropFirst(2)))
         }
 
         return candidates
     }
 
-    // ═══════════════════════════════════
-    // MARK: - ERRORS
-    // ═══════════════════════════════════
+    // MARK: - Errors
 
     enum AppError: LocalizedError {
         case insufficientPermissions
@@ -578,18 +412,12 @@ class InventoryManager: ObservableObject {
 
         var errorDescription: String? {
             switch self {
-            case .insufficientPermissions:
-                return "You don't have permission for this action."
-            case .itemNotFound:
-                return "Item not found."
-            case .insufficientStock:
-                return "Not enough stock."
-            case .duplicateBarcode:
-                return "An item with this barcode already exists."
-            case .voidWindowExpired:
-                return "The 5-minute void window has expired. Contact an editor or above."
-            case .noClinicAssigned:
-                return "No clinic assigned to your account. Contact your admin."
+            case .insufficientPermissions: return "You don't have permission for this action."
+            case .itemNotFound:            return "Item not found."
+            case .insufficientStock:       return "Not enough stock."
+            case .duplicateBarcode:        return "An item with this barcode already exists."
+            case .voidWindowExpired:       return "The 5-minute void window has expired. Contact an editor or above."
+            case .noClinicAssigned:        return "No clinic assigned to your account. Contact your admin."
             }
         }
     }

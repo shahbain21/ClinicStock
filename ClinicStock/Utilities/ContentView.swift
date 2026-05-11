@@ -4,16 +4,6 @@
 //
 //  Created by Mohamed Shahbain on 3/30/26.
 //
-//  FIXES:
-//  - Admin email/password are now user-supplied inputs instead of
-//    hardcoded "admin@clinicstock.com" / "Test1234!".
-//  - "Reset" buttons let you re-run seeders without tearing down the
-//    whole settings flow.
-//  - Errors from the seeders surface in the UI (previously buried in
-//    the Xcode console).
-//  - AppTheme tokens replace raw SwiftUI colors for visual consistency.
-//  - Preview uses AuthManager.preview() so it doesn't touch Firebase.
-//
 
 import SwiftUI
 
@@ -30,36 +20,23 @@ struct ContentView: View {
     var body: some View {
         ScrollView {
             VStack(spacing: AppSpacing.xl) {
-
                 Spacer().frame(height: AppSpacing.lg)
-
                 header
-
                 clinicInfo
-
                 Divider().padding(.horizontal, AppSpacing.xxxl)
-
                 fullSeederSection
-
                 Divider().padding(.horizontal, AppSpacing.xxxl)
-
                 inventoryOnlySection
-
                 Divider().padding(.horizontal, AppSpacing.xxxl)
-
                 catalogSeederSection
-
                 Spacer().frame(height: AppSpacing.xxxl)
             }
         }
         .appBackground()
         .alert("Seed Inventory?", isPresented: $showInventoryOnlyConfirm) {
             Button("Seed") {
-                if let clinicID = authManager.effectiveClinicID,
-                   !clinicID.isEmpty {
-                    Task {
-                        await seeder.seedInventoryOnly(clinicID: clinicID)
-                    }
+                if let clinicID = authManager.effectiveClinicID, !clinicID.isEmpty {
+                    Task { await seeder.seedInventoryOnly(clinicID: clinicID) }
                 }
             }
             Button("Cancel", role: .cancel) {}
@@ -82,20 +59,16 @@ struct ContentView: View {
         }
     }
 
-    // ══════════════════════════════════════════════════════
     // MARK: - Sections
-    // ══════════════════════════════════════════════════════
 
     private var header: some View {
         VStack(spacing: AppSpacing.sm) {
             Image(systemName: "cross.case.fill")
                 .font(.system(size: 60))
                 .foregroundColor(AppColors.accent)
-
             Text("ClinicStock")
                 .font(AppFonts.largeTitle)
                 .foregroundColor(AppColors.textPrimary)
-
             Text("Backend Setup")
                 .font(AppFonts.caption)
                 .foregroundColor(AppColors.textSecondary)
@@ -104,8 +77,7 @@ struct ContentView: View {
 
     @ViewBuilder
     private var clinicInfo: some View {
-        if let clinic = authManager.currentClinic,
-           let clinicID = clinic.id {
+        if let clinic = authManager.currentClinic, let clinicID = clinic.id {
             VStack(spacing: AppSpacing.xs) {
                 Text("Current Clinic: \(clinic.name)")
                     .font(AppFonts.caption)
@@ -128,14 +100,12 @@ struct ContentView: View {
                 .font(AppFonts.title3)
                 .foregroundColor(AppColors.textPrimary)
 
-            // Admin credentials — editable, no longer hardcoded
             VStack(spacing: AppSpacing.sm) {
                 TextField("Admin email", text: $adminEmail)
                     .textFieldStyle(.roundedBorder)
                     .autocorrectionDisabled()
                     .textInputAutocapitalization(.never)
                     .keyboardType(.emailAddress)
-
                 SecureField("Admin password", text: $adminPassword)
                     .textFieldStyle(.roundedBorder)
             }
@@ -158,15 +128,11 @@ struct ContentView: View {
 
             Button {
                 Task {
-                    // Proactive pre-check so the user sees the confirmation
-                    // dialog instead of a silent abort.
                     await seeder.seedDatabase(
                         adminEmail: adminEmail,
                         adminPassword: adminPassword,
                         allowIfExisting: false
                     )
-                    // If seeder aborted due to existing data, prompt to
-                    // allow override.
                     if seeder.lastError?.contains("allowIfExisting") == true {
                         showAllowIfExistingConfirm = true
                     }
@@ -194,11 +160,9 @@ struct ContentView: View {
             .padding(.horizontal, AppSpacing.xxxl)
 
             if seeder.isComplete {
-                Button("Reset") {
-                    seeder.reset()
-                }
-                .font(AppFonts.caption)
-                .foregroundColor(AppColors.accent)
+                Button("Reset") { seeder.reset() }
+                    .font(AppFonts.caption)
+                    .foregroundColor(AppColors.accent)
             }
         }
     }
@@ -208,7 +172,6 @@ struct ContentView: View {
             Text("Seed Inventory Only")
                 .font(AppFonts.title3)
                 .foregroundColor(AppColors.textPrimary)
-
             Text("Add sample inventory to your current clinic")
                 .font(AppFonts.caption)
                 .foregroundColor(AppColors.textSecondary)
@@ -225,10 +188,7 @@ struct ContentView: View {
             }
             .buttonStyle(.borderedProminent)
             .tint(AppColors.warning)
-            .disabled(
-                seeder.isSeeding ||
-                (authManager.effectiveClinicID?.isEmpty ?? true)
-            )
+            .disabled(seeder.isSeeding || (authManager.effectiveClinicID?.isEmpty ?? true))
             .padding(.horizontal, AppSpacing.xxxl)
         }
     }
@@ -286,11 +246,9 @@ struct ContentView: View {
             .padding(.horizontal, AppSpacing.xxxl)
 
             if catalogSeeder.isComplete {
-                Button("Reset") {
-                    catalogSeeder.reset()
-                }
-                .font(AppFonts.caption)
-                .foregroundColor(AppColors.accent)
+                Button("Reset") { catalogSeeder.reset() }
+                    .font(AppFonts.caption)
+                    .foregroundColor(AppColors.accent)
             }
         }
     }
